@@ -90,14 +90,15 @@ Styles are injected automatically on mount. Importing CSS is optional (see [Styl
 | Header | Drag with mouse or touch. When focused, arrows move 10px; Shift + arrows move 1px. |
 | Top-left handle | Resize while pinning the bottom-right corner — useful for enlarging the docked panel. |
 | Bottom-right handle | Resize while pinning the top-left corner. Both handles support arrows and Shift + arrows. |
+| Filter toggle | Collapse the search/level/source toolbar to hand its height back to the log list — worth ~90px on a small panel, where the toolbar wraps to two rows. The choice is remembered across reloads. |
 | Search | Case-insensitive substring match on the message text. For network rows that covers the method, URL, and status. |
-| Level / Source | Combine severity and Browser/Network/Server filters with search. |
+| Level / Source | Combine severity and Browser/Network/Server filters with search. Collapsing the toolbar keeps its filters applied, and the toggle shows a dot while any is active. |
 | Inspect arguments | Expand the text snapshot taken at the moment of the console call. |
 | Copy icon | Copies `[ISO timestamp] [source] [level] message`. |
 | Clear icon | Clears the browser store, including filtered-out entries. Does not touch DevTools or server history. |
 | Escape / close | Close the panel and return focus to the launcher. |
 
-The panel opens at up to **640 × 512px**, shrinks to a **320 × 280px** minimum, and always stays inside the viewport. **Position and size are remembered in `sessionStorage`**, so they survive a reload and are cleared when the tab closes. Filters reset when the scanner is hidden or unmounted. Opening the panel focuses the search field.
+The panel opens at up to **640 × 512px**, shrinks to a **320 × 280px** minimum, and always stays inside the viewport. **Position, size, and whether the filter toolbar is collapsed are remembered in `sessionStorage`**, so they survive a reload and are cleared when the tab closes. Filter values themselves reset when the scanner is hidden or unmounted. Opening the panel focuses the search field, or the log list when the toolbar is collapsed.
 
 ## Network capture
 

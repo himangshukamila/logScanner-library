@@ -434,7 +434,9 @@ Status codes map onto levels in `createNetworkEntry`, which keeps a searchable o
 
 ### Panel geometry persistence
 
-`usePanelGeometry` writes the rectangle to `sessionStorage` when a gesture settles rather than on every pointer sample, and reads it back when the panel next opens. Stored values are hand-editable, so they are validated as four finite numbers and then clamped to the current viewport. Every storage call is wrapped: disabled, partitioned, or quota-exhausted storage degrades to an in-memory session instead of preventing the panel from opening.
+`usePanelGeometry` writes the rectangle to `sessionStorage` when a gesture settles rather than on every pointer sample, and reads it back when the panel next opens. Stored values are hand-editable, so they are validated as four finite numbers and then clamped to the current viewport. `src/react/session.ts` owns every storage call: disabled, partitioned, or quota-exhausted storage degrades to an in-memory session instead of preventing the panel from opening.
+
+The collapsed state of the filter toolbar persists through the same helper. Collapsing only hides the controls — the current search, level, and source keep filtering — so the header toggle carries a dot whenever a filter is narrowing the list, and the footer's `matching / captured` count stays visible. With the toolbar collapsed there is no search field to receive focus when the panel opens, so focus moves to the log list region instead.
 
 `boundsFor` reserves the launcher's corner on whichever edge it occupies, so a `top-*` position pushes the panel's top edge down instead of letting it slide underneath the launcher.
 
@@ -475,6 +477,7 @@ Read the source in this order to follow one browser message: `types.ts` → `con
 | `src/react/usePanelGeometry.ts` | Initial/clamped rectangles, primary-pointer ownership, drag/resize calculations, keyboard adjustments, and viewport changes. |
 | `src/browser/network.ts` | Ref-counted fetch/XHR interception, body planning and preview reads, and response-ordered emission. |
 | `src/react/highlight.tsx` | Token colouring for serialized previews, with a length ceiling that falls back to plain text. |
+| `src/react/session.ts` | Guarded sessionStorage reads/writes shared by panel geometry and the toolbar toggle. |
 | `src/react/logo.tsx` | Inline SVG brand mark with optional accessible label. |
 | `src/assets.d.ts` | Type declaration for `*.css?inline` imports, including declaration-only builds without Vite client types. |
 | `src/styles.css` | Prefixed library Tailwind entry with explicit component scanning and no reset. |
