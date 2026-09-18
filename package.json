@@ -1,6 +1,6 @@
 {
   "name": "logscan",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "description": "A development-only React console panel with local Node.js log streaming.",
   "type": "module",
