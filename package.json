@@ -1,0 +1,85 @@
+{
+  "name": "logscan",
+  "version": "0.3.0",
+  "private": false,
+  "description": "A development-only React console panel with local Node.js log streaming.",
+  "type": "module",
+  "license": "MIT",
+  "author": "anshhu",
+  "keywords": [
+    "react",
+    "console",
+    "logger",
+    "devtools",
+    "in-app-console",
+    "debug"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "flow.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/types/node/index.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./styles.css": "./dist/log-scanner.css",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite --config examples/vite.config.ts",
+    "dev:server": "tsx examples/server.ts",
+    "build": "vite build && vite build --config vite.node.config.ts && tsc -p tsconfig.build.json",
+    "build:example": "vite build --config examples/vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:package": "node scripts/verify-package.mjs",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:e2e && npm run test:package",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "react": "^18.3.0 || ^19.0.0",
+    "react-dom": "^18.3.0 || ^19.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "react-error-boundary": "^6.1.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "express": "^5.2.1",
+    "jsdom": "^30.1.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  }
+}
