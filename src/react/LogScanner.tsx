@@ -65,8 +65,8 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
   const [search, setSearch] = useState('');
   const [level, setLevel] = useState<LogEntry['level'] | 'all'>('all');
   const [source, setSource] = useState<LogEntry['source'] | 'all'>('all');
-  // Collapsing the toolbar returns its height to the log list, which matters most on a small panel.
-  const [filtersOpen, setFiltersOpen] = useState(() => readSession(FILTERS_KEY) !== false);
+  // Search stays visible; less frequent controls can be tucked away.
+  const [filtersOpen, setFiltersOpen] = useState(() => readSession(FILTERS_KEY) === true);
   const [copyStatus, setCopyStatus] = useState<CopyStatus>({ token: null, message: '' });
   const focusSearchNext = useRef(false);
   const launcher = useRef<HTMLButtonElement>(null);
@@ -93,7 +93,6 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
 
   useEffect(() => {
     if (open && positioned) {
-      // With the toolbar collapsed there is no search field, so the log list takes focus instead.
       (searchInput.current ?? list.current)?.focus();
       wasOpen.current = true;
     } else if (!open && wasOpen.current) {
@@ -117,14 +116,15 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
   if (!mounted) return null;
 
   const query = search.trim().toLowerCase();
-  // A collapsed toolbar still filters, so the header has to say when something is hidden by it.
+  // A collapsed filter row still applies its selections.
   const filtersActive = query !== '' || level !== 'all' || source !== 'all';
   const filteredEntries = open ? entries.filter((entry) =>
     (level === 'all' || entry.level === level) &&
     (source === 'all' || entry.source === source) &&
-    (!query || entry.message.toLowerCase().includes(query)),
+    (!query || [entry.message, entry.network?.url, entry.network?.requestBody, entry.network?.responseBody]
+      .some((text) => text?.toLowerCase().includes(query))),
   ) : [];
-  const errors = open ? entries.filter((entry) => entry.level === 'error').length : 0;
+  const filterCount = Number(level !== 'all') + Number(source !== 'all');
 
   function closePanel() {
     setOpen(false);
@@ -145,7 +145,7 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
               closePanel();
             }
           }}
-          className="ls:pointer-events-auto ls:fixed ls:box-border ls:flex ls:min-h-0 ls:min-w-0 ls:flex-col ls:overflow-hidden ls:rounded-xl ls:border ls:border-solid ls:border-neutral-700 ls:bg-neutral-950 ls:shadow-2xl ls:shadow-black/20"
+          className="ls:pointer-events-auto ls:fixed ls:box-border ls:flex ls:min-h-0 ls:min-w-0 ls:flex-col ls:overflow-hidden ls:rounded-xl ls:border ls:border-solid ls:border-neutral-700 ls:bg-neutral-950 ls:shadow-2xl ls:shadow-black/30"
         >
           <header className="ls:relative ls:flex ls:shrink-0 ls:items-center ls:gap-2.5 ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:bg-neutral-900 ls:py-2 ls:pr-3 ls:pl-9 ls:sm:pr-4">
             <button
@@ -168,38 +168,21 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
               title="Drag to move · arrow keys to adjust"
               className={clsx('ls:flex ls:h-8 ls:min-w-0 ls:flex-1 ls:touch-none ls:items-center ls:gap-2.5 ls:rounded ls:border-0 ls:bg-transparent ls:p-0 ls:text-neutral-400 ls:select-none ls:focus-visible:outline-2 ls:focus-visible:outline-offset-2 ls:focus-visible:outline-neutral-300', interaction === 'drag' ? 'ls:cursor-grabbing' : 'ls:cursor-grab')}
             >
-              <LogScannerLogo size={28} label="Log Scanner" className="ls:pointer-events-none ls:size-7 ls:shrink-0" />
-              <span className="ls:rounded ls:bg-neutral-800 ls:px-1.5 ls:font-mono ls:text-xs ls:tabular-nums">{entries.length}</span>
-              <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" className="ls:ml-auto ls:size-4 ls:text-neutral-500"><circle cx="7" cy="6" r="1" /><circle cx="13" cy="6" r="1" /><circle cx="7" cy="10" r="1" /><circle cx="13" cy="10" r="1" /><circle cx="7" cy="14" r="1" /><circle cx="13" cy="14" r="1" /></svg>
+              <LogScannerLogo size={24} className="ls:pointer-events-none ls:size-6 ls:shrink-0" />
+              <span className="ls:font-sans ls:text-sm ls:font-semibold ls:text-neutral-100">Console</span>
+              <span aria-label={`${entries.length} captured logs`} className="ls:font-mono ls:text-xs ls:tabular-nums ls:text-neutral-400">{entries.length}</span>
             </button>
             <span id={moveHelpId} className="ls:sr-only">Drag to move the panel. Arrow keys move it ten pixels; hold Shift for one pixel.</span>
-            <span className={clsx('ls:shrink-0 ls:text-xs', errors ? 'ls:text-red-300' : 'ls:text-neutral-400')}>{errors ? `${errors} ${errors === 1 ? 'error' : 'errors'}` : 'No errors'}</span>
-            <button
-              type="button"
-              aria-label={filtersOpen ? 'Hide filters' : 'Show filters'}
-              aria-expanded={filtersOpen}
-              aria-controls={filtersOpen ? filtersId : undefined}
-              title={filtersOpen ? 'Hide filters' : 'Show filters'}
-              onClick={() => {
-                focusSearchNext.current = !filtersOpen;
-                setFiltersOpen((value) => {
-                  writeSession(FILTERS_KEY, !value);
-                  return !value;
-                });
-              }}
-              className={clsx(BUTTON, 'ls:w-8 ls:px-0', filtersOpen || filtersActive ? 'ls:border-neutral-500 ls:text-neutral-100' : 'ls:border-transparent')}
-            >
-              <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="ls:size-4"><path d="M3.5 5h13l-5 6v4.5l-3-1.5V11z" /></svg>
-              {filtersActive && <span aria-hidden="true" className="ls:absolute ls:mt-4 ls:ml-4 ls:size-1.5 ls:rounded-full ls:bg-sky-400" />}
+            <button type="button" aria-label="Clear" title="Clear all captured logs" disabled={entries.length === 0} onClick={() => { store.clear(); setCopyStatus({ token: null, message: 'Logs cleared.' }); followLatest.current = true; }} className={clsx(BUTTON, 'ls:border-transparent')}>
+              Clear
             </button>
             <button type="button" aria-label="Close log panel" title="Close panel (Esc)" onClick={closePanel} className={clsx(BUTTON, 'ls:w-8 ls:border-transparent ls:px-0')}>
               <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="ls:size-4"><path d="m5 5 10 10M15 5 5 15" /></svg>
             </button>
           </header>
 
-          {filtersOpen && (
-          <div id={filtersId} className="ls:flex ls:shrink-0 ls:flex-wrap ls:items-center ls:gap-2 ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:bg-neutral-900/50 ls:px-3 ls:py-2.5 ls:sm:px-4">
-            <div className="ls:relative ls:min-w-40 ls:flex-1">
+          <div className="ls:flex ls:shrink-0 ls:items-center ls:gap-2 ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:px-3 ls:py-2 ls:sm:px-4">
+            <div className="ls:relative ls:min-w-0 ls:flex-1">
               <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="ls:pointer-events-none ls:absolute ls:top-2 ls:left-2.5 ls:size-4 ls:text-neutral-400"><circle cx="8.5" cy="8.5" r="5" /><path d="m12.5 12.5 4 4" /></svg>
               <label htmlFor={searchId} className="ls:sr-only">Search logs</label>
               <input
@@ -208,21 +191,39 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
                 type="search"
                 autoComplete="off"
                 value={search}
-                placeholder="Filter messages…"
+                placeholder="Search logs and responses"
                 onChange={(event) => { followLatest.current = true; setSearch(event.target.value); }}
                 className={clsx(CONTROL, 'ls:w-full ls:pl-8 ls:placeholder:text-neutral-400')}
               />
             </div>
-            <div className="ls:flex ls:min-w-0 ls:basis-64 ls:grow ls:items-center ls:gap-2">
+            <button
+              type="button"
+              aria-label={filtersOpen ? 'Hide filters' : 'Show filters'}
+              aria-expanded={filtersOpen}
+              aria-controls={filtersOpen ? filtersId : undefined}
+              onClick={() => {
+                focusSearchNext.current = !filtersOpen;
+                const next = !filtersOpen;
+                writeSession(FILTERS_KEY, next);
+                setFiltersOpen(next);
+              }}
+              className={clsx(BUTTON, filterCount > 0 && 'ls:border-neutral-400 ls:text-white')}
+            >
+              Filters{filterCount > 0 && <span className="ls:font-mono ls:tabular-nums">{filterCount}</span>}
+              <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="ls:size-3"><path d={filtersOpen ? 'm5 12 5-5 5 5' : 'm5 8 5 5 5-5'} /></svg>
+            </button>
+          </div>
+          {filtersOpen && (
+            <div id={filtersId} className="ls:flex ls:shrink-0 ls:flex-wrap ls:items-end ls:gap-2 ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:bg-neutral-900/50 ls:px-3 ls:py-2 ls:sm:px-4">
               <div className="ls:min-w-0 ls:basis-24 ls:flex-1">
-                <label htmlFor={levelId} className="ls:sr-only">Level</label>
+                <label htmlFor={levelId} className="ls:mb-1 ls:block ls:text-xs ls:text-neutral-400">Level</label>
                 <select id={levelId} value={level} onChange={(event) => { followLatest.current = true; setLevel(event.target.value as typeof level); }} className={clsx(CONTROL, 'ls:w-full')}>
                   <option value="all">All levels</option>
-                  {LOG_LEVELS.map((value) => <option key={value} value={value}>{value}</option>)}
+                  {LOG_LEVELS.map((value) => <option key={value} value={value}>{value === 'warn' ? 'Warning' : value.charAt(0).toUpperCase() + value.slice(1)}</option>)}
                 </select>
               </div>
               <div className="ls:min-w-0 ls:basis-28 ls:flex-1">
-                <label htmlFor={sourceId} className="ls:sr-only">Source</label>
+                <label htmlFor={sourceId} className="ls:mb-1 ls:block ls:text-xs ls:text-neutral-400">Source</label>
                 <select id={sourceId} value={source} onChange={(event) => { followLatest.current = true; setSource(event.target.value as typeof source); }} className={clsx(CONTROL, 'ls:w-full')}>
                   <option value="all">All sources</option>
                   <option value="browser">Browser</option>
@@ -230,11 +231,8 @@ function ActiveScanner({ serverUrl, maxLogs, position, network }: Required<Pick<
                   <option value="server">Server</option>
                 </select>
               </div>
-              <button type="button" aria-label="Clear" title="Clear logs" disabled={entries.length === 0} onClick={() => { store.clear(); setCopyStatus({ token: null, message: 'Logs cleared.' }); followLatest.current = true; }} className={clsx(BUTTON, 'ls:w-8 ls:px-0')}>
-                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="ls:size-3.5"><path d="M4 5h12M8 5V3h4v2M6 5l.7 11h6.6L14 5M9 8v5m2-5v5" /></svg>
-              </button>
+              {filtersActive && <button type="button" onClick={() => { setSearch(''); setLevel('all'); setSource('all'); followLatest.current = true; }} className={BUTTON}>Reset</button>}
             </div>
-          </div>
           )}
 
           <div

@@ -1,4 +1,10 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator } from '@playwright/test';
+
+async function showFilters(panel: Locator) {
+  await expect(panel).toBeVisible();
+  const button = panel.getByRole('button', { name: 'Show filters' });
+  if (await button.count()) await button.click();
+}
 
 test('captures browser calls once, searches, filters, and restores keyboard focus', async ({ page }) => {
   await page.goto('/');
@@ -10,9 +16,11 @@ test('captures browser calls once, searches, filters, and restores keyboard focu
   await page.getByRole('button', { name: 'Log a message', exact: true }).click();
   await page.getByRole('button', { name: 'Log a warning', exact: true }).click();
   await expect(panel.locator('li').filter({ hasText: 'Hello from the browser' })).toHaveCount(1);
+  await showFilters(panel);
   await panel.getByLabel('Level', { exact: true }).selectOption('warn');
   await expect(panel.locator('li')).toHaveCount(1);
   await expect(panel.locator('li')).toContainText('A development warning');
+  await showFilters(panel);
   await panel.getByLabel('Level', { exact: true }).selectOption('all');
   await panel.getByLabel('Search logs').fill('Hello from');
   await expect(panel.locator('li')).toHaveCount(1);
@@ -30,10 +38,12 @@ test('streams real Node.js logs separately from browser response logs', async ({
   await expect(panel.getByText('Browser + server connected', { exact: true })).toBeVisible();
   await panel.getByRole('button', { name: 'Clear', exact: true }).click();
   await page.getByRole('button', { name: 'Run server check' }).click();
+  await showFilters(panel);
   await panel.getByLabel('Source', { exact: true }).selectOption('server');
   await expect(panel.locator('li').filter({ hasText: 'Node.js received a server check' })).toHaveCount(1);
   await expect(panel.locator('li').filter({ hasText: 'this is server responce' })).toHaveCount(1);
   await expect(panel.locator('li').filter({ hasText: 'send data to server' })).toHaveCount(0);
+  await showFilters(panel);
   await panel.getByLabel('Source', { exact: true }).selectOption('browser');
   await expect(panel.locator('li').filter({ hasText: 'send data to server' })).toHaveCount(1);
   await expect(panel.locator('li').filter({ hasText: 'this is server responce' })).toHaveCount(1);
@@ -93,6 +103,7 @@ test('disabled mode does not connect or render, and enabling/disabling cleans up
   await page.getByRole('button', { name: 'Enable scanner' }).click();
   await page.getByRole('button', { name: 'Open Log Scanner' }).click();
   const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
+  await showFilters(panel);
   await panel.getByLabel('Source', { exact: true }).selectOption('browser');
   await expect(panel.locator('li').filter({ hasText: 'A development warning' })).toHaveCount(0);
 });
@@ -127,6 +138,7 @@ test('captures real fetch traffic with status, timing, and response body', async
   const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
   await panel.getByRole('button', { name: 'Clear', exact: true }).click();
   await page.getByRole('button', { name: 'Run server check' }).click();
+  await showFilters(panel);
   await panel.getByLabel('Source', { exact: true }).selectOption('network');
 
   const entry = panel.locator('li').filter({ hasText: '/api/check' });
@@ -153,10 +165,12 @@ test('collapsing the toolbar returns its height to the log list', async ({ page 
   const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
   const list = panel.getByLabel('Captured logs', { exact: true });
 
+  await showFilters(panel);
   const before = (await list.boundingBox())!;
   const panelBefore = (await panel.boundingBox())!;
   await panel.getByRole('button', { name: 'Hide filters' }).click();
-  await expect(panel.getByLabel('Search logs')).toHaveCount(0);
+  await expect(panel.getByLabel('Search logs')).toBeVisible();
+  await expect(panel.getByLabel('Level', { exact: true })).toHaveCount(0);
 
   const after = (await list.boundingBox())!;
   // The panel keeps its size; the reclaimed toolbar height goes to the list.
@@ -166,7 +180,8 @@ test('collapsing the toolbar returns its height to the log list', async ({ page 
   await page.reload();
   await page.getByRole('button', { name: 'Open Log Scanner' }).click();
   await expect(panel.getByRole('button', { name: 'Show filters' })).toBeVisible();
-  await expect(panel.getByLabel('Search logs')).toHaveCount(0);
+  await expect(panel.getByLabel('Search logs')).toBeVisible();
+  await expect(panel.getByLabel('Level', { exact: true })).toHaveCount(0);
 });
 
 test('launcher honours a requested corner', async ({ page }) => {
@@ -276,6 +291,7 @@ test('keeps the panel usable after extreme dragging, resizing, and viewport chan
   expect(bounds.width).toBe(320);
   expect(bounds.height).toBe(280);
   await expect(panel.getByLabel('Search logs')).toBeVisible();
+  await showFilters(panel);
   await expect(panel.getByLabel('Level', { exact: true })).toBeVisible();
   await expect(panel.getByLabel('Source', { exact: true })).toBeVisible();
 
@@ -325,3 +341,91 @@ test('opens existing history at the latest entry and follows it while resizing',
   await resizeHandle.press('ArrowUp');
   await expect.poll(() => list.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(2);
 });
+
+test('shows readable JSON and copies the actual response, request, and complete network entry', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/');
+  const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/check' && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Run server check' }).click();
+  const response = await (await responsePromise).json();
+  await page.getByRole('button', { name: 'Open Log Scanner' }).click();
+  const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
+  await expect(panel.getByLabel('Search logs')).toBeVisible();
+  await expect(panel.getByLabel('Source', { exact: true })).toHaveCount(0);
+  await showFilters(panel);
+  await panel.getByLabel('Source', { exact: true }).selectOption('network');
+  await panel.getByLabel('Search logs').fill(response.requestId);
+  const entry = panel.locator('li').filter({ hasText: '/api/check' });
+  await expect(entry).toHaveCount(1);
+  await entry.getByRole('button', { name: 'Copy response', exact: true }).click();
+  await expect.poll(() => page.evaluate(async () => JSON.parse(await navigator.clipboard.readText()))).toEqual(response);
+  await entry.locator('summary').click();
+  const body = entry.getByLabel('Response body', { exact: true });
+  await expect(body).toContainText('"requestId":');
+  expect(await body.textContent()).toContain('\n  "request": {\n    "message":');
+  await entry.getByRole('button', { name: 'Copy request body', exact: true }).click();
+  await expect.poll(() => page.evaluate(async () => JSON.parse(await navigator.clipboard.readText()))).toEqual({ message: 'Check the development server' });
+  await entry.getByRole('button', { name: 'Copy info entry' }).click();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toContain('Status: 200');
+  expect(copied).toContain('Request body:');
+  expect(copied).toContain('Response body:');
+  expect(copied).toContain(response.requestId);
+  await page.screenshot({ path: 'artifacts/structured-response.png', fullPage: true });
+});
+
+test('keeps both real responses when the application reuses an XHR in loadend', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open Log Scanner' }).click();
+  const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
+  const responses = await page.evaluate(() => new Promise<unknown[]>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const results: unknown[] = [];
+    function send() {
+      xhr.open('POST', `/api/check?xhr-reuse=${results.length}`);
+      xhr.responseType = 'json';
+      xhr.timeout = 5000;
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.send(JSON.stringify({ message: `XHR response ${results.length}` }));
+    }
+    xhr.addEventListener('loadend', () => {
+      if (xhr.status !== 200) { reject(new Error(`XHR failed: ${xhr.status}`)); return; }
+      results.push(xhr.response);
+      if (results.length === 2) resolve(results);
+      else send();
+    });
+    send();
+  }));
+  await showFilters(panel);
+  await panel.getByLabel('Source', { exact: true }).selectOption('network');
+  await panel.getByLabel('Search logs').fill('xhr-reuse=');
+  await expect(panel.locator('li')).toHaveCount(2);
+  for (let index = 0; index < responses.length; index++) {
+    const entry = panel.locator('li').filter({ hasText: `xhr-reuse=${index}` });
+    await entry.getByRole('button', { name: 'Copy response', exact: true }).click();
+    await expect.poll(() => page.evaluate(async () => JSON.parse(await navigator.clipboard.readText()))).toEqual(responses[index]);
+  }
+});
+
+for (const uncaught of [false, true]) {
+  test(`keeps the viewer usable after an ${uncaught ? 'uncaught' : 'error-boundary'} application crash`, async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.goto(uncaught ? '/?uncaught' : '/');
+    await page.getByRole('button', { name: 'Open Log Scanner' }).click();
+    const panel = page.getByRole('region', { name: 'Log Scanner', exact: true });
+    await page.getByRole('button', { name: 'Crash demo app' }).click();
+    await expect(page.getByRole('heading', { name: 'Console playground' })).toHaveCount(0);
+    await expect(panel).toBeVisible();
+    await panel.getByLabel('Search logs').fill('Demo application render failed');
+    const error = panel.locator('li').filter({ hasText: 'Demo application render failed' }).first();
+    await expect(error).toBeVisible();
+    await error.getByRole('button', { name: 'Copy error entry' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('Demo application render failed');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('at App');
+    await panel.getByRole('button', { name: 'Close log panel' }).click();
+    await page.getByRole('button', { name: 'Open Log Scanner' }).click();
+    await expect(panel).toBeVisible();
+    await page.screenshot({ path: `artifacts/crash-${uncaught ? 'uncaught' : 'caught'}.png`, fullPage: true });
+  });
+}

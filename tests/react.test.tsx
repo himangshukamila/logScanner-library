@@ -52,6 +52,11 @@ afterEach(() => {
   else Reflect.deleteProperty(navigator, 'clipboard');
 });
 
+function showFilters() {
+  const button = screen.queryByRole('button', { name: 'Show filters' });
+  if (button) fireEvent.click(button);
+}
+
 describe('LogScanner', () => {
   it('uses an inline logo-only launcher when visible is true', () => {
     render(<LogScanner visible />);
@@ -61,17 +66,18 @@ describe('LogScanner', () => {
     expect(launcher.querySelector('img')).toBeNull();
   });
 
-  it('collapses the filter toolbar, keeps its filters applied, and remembers the choice', async () => {
+  it('keeps search visible while secondary filters collapse and remembers their state', async () => {
     const view = render(<LogScanner visible network={false} />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Log Scanner' }));
     act(() => { window.console.log('Kept row'); window.console.warn('Hidden row'); });
     await screen.findByText('Kept row');
 
+    showFilters();
     fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'log' } });
     expect(screen.getAllByRole('listitem')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: 'Hide filters' }));
-    expect(screen.queryByRole('searchbox', { name: 'Search logs' })).not.toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search logs' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Level')).not.toBeInTheDocument();
     // The level filter is out of sight but still narrowing the list.
     expect(screen.getAllByRole('listitem')).toHaveLength(1);
@@ -82,13 +88,13 @@ describe('LogScanner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show filters' }));
     expect(screen.getByRole('searchbox', { name: 'Search logs' })).toHaveFocus();
 
-    // A later session opens collapsed and focuses the log list instead of the missing search field.
+    // A later session keeps secondary filters collapsed and focuses the visible search field.
     fireEvent.click(screen.getByRole('button', { name: 'Hide filters' }));
     view.unmount();
     render(<LogScanner visible network={false} />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Log Scanner' }));
-    expect(screen.queryByRole('searchbox', { name: 'Search logs' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Captured logs')).toHaveFocus();
+    expect(screen.getByRole('searchbox', { name: 'Search logs' })).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search logs' })).toHaveFocus();
   });
 
   it('places the launcher in the requested corner above application stacking contexts', () => {
@@ -130,6 +136,7 @@ describe('LogScanner', () => {
       });
     });
     await screen.findByText('/api/cart');
+    showFilters();
     fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'network' } });
     expect(screen.getAllByRole('listitem')).toHaveLength(1);
     expect(screen.getByText('404')).toBeInTheDocument();
@@ -221,6 +228,7 @@ describe('LogScanner', () => {
     act(() => { window.console.log('Order saved'); window.console.warn('Payment delayed'); });
     await screen.findByText('Order saved');
     expect(getBrowserStore().getSnapshot()).toHaveLength(2);
+    showFilters();
     fireEvent.change(screen.getByLabelText('Level'), { target: { value: 'warn' } });
     expect(screen.queryByText('Order saved')).not.toBeInTheDocument();
     expect(screen.getByText('Payment delayed')).toBeInTheDocument();
@@ -258,6 +266,7 @@ describe('LogScanner', () => {
     expect(screen.getByText('Reconnecting to server… Browser logs remain available.')).toBeInTheDocument();
     act(() => { stream.open(); });
     expect(screen.getByText('Browser + server connected')).toBeInTheDocument();
+    showFilters();
     fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'browser' } });
     expect(screen.queryByText('Server request completed')).not.toBeInTheDocument();
     unmount();

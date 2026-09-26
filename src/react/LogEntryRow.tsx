@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type Dispatch, type SetStat
 import clsx from 'clsx';
 import type { LogEntry, NetworkInfo } from '../core/types.js';
 import { highlight } from './highlight.js';
+import { copyTextForEntry, formatLogText, sectionsForEntry } from './formatLog.js';
 
 const LEVEL_STYLES: Record<LogEntry['level'], string> = {
   log: 'ls:text-neutral-300',
@@ -20,16 +21,7 @@ function statusStyle(network: NetworkInfo): string {
   return 'ls:text-emerald-300';
 }
 
-function sectionsFor(entry: LogEntry): Array<{ label: string; text: string }> {
-  if (!entry.network) return entry.args.map((text, index) => ({ label: `Argument ${index + 1}`, text }));
-  const { url, contentType, requestBody, responseBody } = entry.network;
-  return [
-    { label: 'URL', text: url },
-    ...(contentType ? [{ label: 'Content type', text: contentType }] : []),
-    ...(requestBody ? [{ label: 'Request body', text: requestBody }] : []),
-    ...(responseBody ? [{ label: 'Response body', text: responseBody }] : []),
-  ];
-}
+const COPY_BUTTON = 'ls:shrink-0 ls:cursor-pointer ls:rounded ls:border ls:border-solid ls:border-neutral-700 ls:bg-neutral-900 ls:px-2 ls:py-1 ls:font-sans ls:text-xs ls:leading-4 ls:text-neutral-200 ls:hover:bg-neutral-800 ls:focus-visible:outline-2 ls:focus-visible:outline-offset-2 ls:focus-visible:outline-neutral-300 ls:disabled:cursor-wait ls:disabled:opacity-60';
 
 function NetworkSummary({ network }: { network: NetworkInfo }) {
   return (
@@ -39,20 +31,21 @@ function NetworkSummary({ network }: { network: NetworkInfo }) {
       <span className={clsx('ls:font-medium', statusStyle(network))}>
         {network.failed || network.status === undefined ? 'failed' : network.status}
       </span>
-      <span className="ls:tabular-nums ls:text-neutral-500">{Math.round(network.durationMs)} ms</span>
+      <span className="ls:tabular-nums ls:text-neutral-400">{Math.round(network.durationMs)} ms</span>
     </p>
   );
 }
 
 export const LogEntryRow = memo(function LogEntryRow({ entry, onCopyStatus }: { entry: LogEntry; onCopyStatus: Dispatch<SetStateAction<CopyStatus>> }) {
-  const [copying, setCopying] = useState(false);
+  const [copying, setCopying] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const active = useRef(false);
   const operation = useRef(0);
   const pendingCopy = useRef<symbol | null>(null);
   // Entries are frozen at capture time, so highlighting each one is a one-off cost.
-  const message = useMemo(() => highlight(entry.message), [entry.message]);
-  const sections = useMemo(() => sectionsFor(entry), [entry]);
+  const message = useMemo(() => highlight(formatLogText(entry.message)), [entry.message]);
+  const sections = useMemo(() => sectionsForEntry(entry), [entry]);
+  const response = sections.find((section) => section.label === (entry.network?.failed ? 'Error' : 'Response body'));
 
   useEffect(() => {
     active.current = true;
@@ -64,12 +57,13 @@ export const LogEntryRow = memo(function LogEntryRow({ entry, onCopyStatus }: { 
     };
   }, [onCopyStatus]);
 
-  async function copyEntry() {
+  async function copy(text: string, label = 'Log') {
+    if (pendingCopy.current) return;
     const current = ++operation.current;
     const token = Symbol('copy');
     pendingCopy.current = token;
-    setCopying(true);
-    onCopyStatus({ token, message: 'Copying log…' });
+    setCopying(label);
+    onCopyStatus({ token, message: `Copying ${label.toLowerCase()}…` });
     const report = (message: string) => {
       if (active.current && current === operation.current) {
         onCopyStatus((status) => status.token === token ? { token: null, message } : status);
@@ -77,16 +71,14 @@ export const LogEntryRow = memo(function LogEntryRow({ entry, onCopyStatus }: { 
     };
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(
-        `[${new Date(entry.timestamp).toISOString()}] [${entry.source}] [${entry.level}] ${entry.message}`,
-      );
-      report('Log copied to clipboard.');
+      await navigator.clipboard.writeText(text);
+      report(`${label} copied to clipboard.`);
     } catch {
       report('Copy failed. Select and copy the log text manually.');
     } finally {
       if (active.current && current === operation.current) {
         pendingCopy.current = null;
-        setCopying(false);
+        setCopying(null);
       }
     }
   }
@@ -97,39 +89,59 @@ export const LogEntryRow = memo(function LogEntryRow({ entry, onCopyStatus }: { 
       'ls:bg-red-950/15': entry.level === 'error',
     })}>
       <article>
-        <div className="ls:flex ls:items-center ls:gap-3 ls:text-xs ls:leading-5">
-          <time dateTime={new Date(entry.timestamp).toISOString()} className="ls:shrink-0 ls:font-mono ls:tabular-nums ls:text-neutral-500">
+        <div className="ls:flex ls:flex-wrap ls:items-center ls:gap-x-2 ls:gap-y-1 ls:text-xs ls:leading-5">
+          <time dateTime={new Date(entry.timestamp).toISOString()} className="ls:shrink-0 ls:font-mono ls:tabular-nums ls:text-neutral-400">
             {new Date(entry.timestamp).toLocaleTimeString([], { hour12: false })}
           </time>
           <span className={clsx('ls:w-10 ls:shrink-0 ls:font-mono ls:font-medium ls:uppercase', LEVEL_STYLES[entry.level])}>
             {entry.level}
           </span>
-          <span className="ls:text-neutral-500">{entry.source}</span>
-          <button
-            type="button"
-            aria-label={`Copy ${entry.level} entry`}
-            title={copying ? 'Copying…' : 'Copy entry'}
-            disabled={copying}
-            onClick={() => void copyEntry()}
-            className="ls:ml-auto ls:flex ls:size-6 ls:shrink-0 ls:cursor-pointer ls:items-center ls:justify-center ls:rounded ls:border-0 ls:bg-transparent ls:p-0 ls:text-neutral-400 ls:transition-colors ls:hover:bg-neutral-800 ls:hover:text-white ls:focus-visible:outline-2 ls:focus-visible:outline-offset-2 ls:focus-visible:outline-neutral-300 ls:disabled:cursor-wait ls:disabled:opacity-60 ls:motion-reduce:transition-none"
-          >
-            <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className={clsx('ls:size-3.5', copying && 'ls:animate-pulse ls:motion-reduce:animate-none')}>
-              <rect x="7" y="7" width="9" height="10" rx="1.5" /><path d="M12 7V4.5A1.5 1.5 0 0 0 10.5 3h-6A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" />
-            </svg>
-          </button>
+          <span className="ls:text-neutral-400">{entry.source}</span>
+          <div className="ls:ml-auto ls:flex ls:flex-wrap ls:gap-2">
+            {entry.network && response && (
+              <button
+                type="button"
+                aria-label={entry.network.failed ? 'Copy network error' : undefined}
+                disabled={copying !== null}
+                onClick={() => void copy(response.text, entry.network?.failed ? 'Error' : 'Response')}
+                className={COPY_BUTTON}
+              >
+                {entry.network.failed ? 'Copy error' : 'Copy response'}
+              </button>
+            )}
+            <button
+              type="button"
+              aria-label={`Copy ${entry.level} entry`}
+              title="Copy the complete captured entry"
+              disabled={copying !== null}
+              onClick={() => void copy(copyTextForEntry(entry))}
+              className={COPY_BUTTON}
+            >
+              {copying === 'Log' ? 'Copying…' : 'Copy'}
+            </button>
+          </div>
         </div>
         {entry.network
           ? <NetworkSummary network={entry.network} />
-          : <p className="ls:my-1 ls:line-clamp-2 ls:break-all ls:whitespace-pre-wrap ls:font-mono ls:text-xs ls:leading-5 ls:text-neutral-200">{entry.message ? message : '(empty log)'}</p>}
+          : <p className="ls:my-2 ls:max-h-64 ls:overflow-auto ls:break-words ls:whitespace-pre-wrap ls:font-mono ls:text-xs ls:leading-5 ls:text-neutral-200">{entry.message ? message : '(empty log)'}</p>}
         {sections.length > 0 && (
           <details onToggle={(event) => setExpanded(event.currentTarget.open)} className="ls:mt-1 ls:text-xs ls:text-neutral-400">
             <summary className="ls:cursor-pointer ls:rounded ls:py-1 ls:leading-4 ls:transition-colors ls:hover:text-neutral-200 ls:focus-visible:outline-2 ls:focus-visible:outline-neutral-300 ls:motion-reduce:transition-none">
-              {entry.network ? 'Inspect request' : `Inspect ${sections.length} ${sections.length === 1 ? 'argument' : 'arguments'}`}
+              {entry.network ? 'Response and request details' : 'Details'}
             </summary>
             {expanded && sections.map((section) => (
               <div key={section.label} className="ls:my-2 ls:overflow-hidden ls:rounded-md ls:border ls:border-solid ls:border-neutral-800">
-                <div className="ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:bg-neutral-900 ls:px-3 ls:py-1 ls:font-mono ls:text-xs ls:leading-5 ls:text-neutral-400">{section.label}</div>
-                <pre className="ls:m-0 ls:box-border ls:max-w-full ls:overflow-x-auto ls:bg-neutral-950 ls:p-3 ls:font-mono ls:text-xs ls:leading-5 ls:text-neutral-200">
+                <div className="ls:flex ls:items-center ls:justify-between ls:gap-2 ls:border-0 ls:border-b ls:border-solid ls:border-neutral-800 ls:bg-neutral-900 ls:px-3 ls:py-2 ls:font-sans ls:text-xs ls:leading-5 ls:text-neutral-300">
+                  <span>{section.label}</span>
+                  <button
+                    type="button"
+                    aria-label={`Copy ${section.label.toLowerCase()}`}
+                    disabled={copying !== null}
+                    onClick={() => void copy(section.text, section.label)}
+                    className={COPY_BUTTON}
+                  >{copying === section.label ? 'Copying…' : 'Copy'}</button>
+                </div>
+                <pre tabIndex={0} aria-label={section.label} className="ls:m-0 ls:box-border ls:max-h-80 ls:max-w-full ls:overflow-auto ls:whitespace-pre-wrap ls:break-words ls:bg-neutral-950 ls:p-3 ls:font-mono ls:text-xs ls:leading-5 ls:text-neutral-200 ls:focus-visible:outline-2 ls:focus-visible:-outline-offset-2 ls:focus-visible:outline-neutral-300">
                   {highlight(section.text)}
                 </pre>
               </div>

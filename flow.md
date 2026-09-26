@@ -13,7 +13,9 @@ Source paths in this document refer to the repository checkout. The package arch
 - [Safe argument snapshots](#safe-argument-snapshots)
 - [The bounded store](#the-bounded-store)
 - [Browser capture and visibility](#browser-capture-and-visibility)
+- [Standalone mounting and application failures](#standalone-mounting-and-application-failures)
 - [React rendering and interaction](#react-rendering-and-interaction)
+- [Network capture](#network-capture)
 - [Moving and resizing](#moving-and-resizing)
 - [Node capture and streaming](#node-capture-and-streaming)
 - [Receiving server logs](#receiving-server-logs)
@@ -34,7 +36,7 @@ The project is built in layers so capture does not depend on the panel being ope
 6. Integrate both paths in a React/Express playground.
 7. Build separate package entries and verify them in independent consumer apps.
 
-Dragging, resizing, the inline logo, and the `visible` master switch build on these boundaries: geometry stays in the UI layer; visibility controls capture ownership as well as rendering.
+Dragging, resizing, the inline logo, and the `visible` master switch build on these boundaries: geometry stays in the UI layer; visibility controls capture ownership as well as rendering. `mountLogScanner` gives the viewer its own React root, independent of the application root.
 
 | Technology | Role and reason |
 | --- | --- |
@@ -69,12 +71,16 @@ flowchart TB
         UI[LogScanner.tsx]
         ROW[LogEntryRow.tsx]
         GEO[usePanelGeometry.ts]
+        MOUNT[mountLogScanner: independent React root]
+        NET[fetch / XHR capture and bounded previews]
         BC --> BW
         BW --> BO
         BW --> BS
         BE --> BS
         BS --> ST
         ES --> ST
+        NET --> ST
+        MOUNT --> UI
         ST -->|useSyncExternalStore| UI
         UI --> ROW
         GEO --> UI
@@ -108,20 +114,22 @@ interface LogEntry {
   readonly id: string;
   readonly timestamp: number;
   readonly level: 'log' | 'info' | 'warn' | 'error' | 'debug';
-  readonly source: 'browser' | 'server';
+  readonly source: 'browser' | 'server' | 'network';
   readonly args: readonly string[];
   readonly message: string;
+  readonly network?: NetworkInfo;
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `id` | Source + runtime session prefix + increasing counter. The identity registry survives module reloads in that runtime. |
-| `timestamp` | `Date.now()` in milliseconds when the entry is created. |
-| `level` | One of the five intercepted method names. |
+| `timestamp` | Console snapshot time in epoch milliseconds; network entries retain response-settlement/loadend time even when their preview completes later. |
+| `level` | Intercepted console method, or a network status-derived level. |
 | `source` | Where capture happened, not where the entry is displayed. |
-| `args` | Immediate textual snapshots, one per captured argument, possibly followed by a truncation marker. |
-| `message` | `args.join(' ')`; used by search, row previews, and copying. |
+| `args` | Immediate console argument snapshots, possibly followed by a truncation marker. Empty for network entries. |
+| `message` | Console arguments joined with spaces, or a one-line network method/label/status/duration summary. |
+| `network` | Optional frozen method, URL/display label, initiator, duration, status/status text, content type, request/response preview, and failure flag. |
 
 Entries and their argument arrays are frozen. Original application objects are not retained in history. Mutating an object after logging it cannot change the saved preview.
 
@@ -154,7 +162,7 @@ When the final listener leaves, restore a method **only if the current method is
 | Input arguments inspected | At most 64; an extra truncation-marker preview can produce 65 output strings |
 | Nesting depth | Depth 5 becomes `[Max depth]` |
 | Children per collection | At most 40 enumerable object/array children or Map/Set items |
-| Complete generated JSON entry | Below 16 KiB, allowing for duplicated `message` text and metadata |
+| Complete generated console JSON entry | Below 16 KiB, allowing for duplicated `message` text and metadata; network body fields have separate budgets |
 
 `takeBytes` counts escaped control characters, quotes, backslashes, Unicode, and lone surrogates. The budget is based on transport cost, not just JavaScript string length. Each argument consumes the remaining shared budget; an unusually large first argument can leave no room for later ones.
 
@@ -163,14 +171,16 @@ Representation rules:
 - Top-level strings stay unquoted; nested strings are quoted and escaped.
 - Primitive values become text; bigint gets an `n` suffix and functions become `[Function]`.
 - A recursion-path `WeakSet` detects cycles as `[Circular]`. Removing objects on return allows a shared object used in separate branches to be shown again.
-- Data properties are read through descriptors; accessors appear as `[Getter]` or `[Setter]` instead of invoking ordinary getters. `toJSON()` is not used.
-- Errors include name/message, available stack, and an own data-property `cause`.
+- Data properties are read through descriptors; ordinary/custom accessors appear as `[Getter]` or `[Setter]`. `toJSON()` is not used.
+- Errors include name/message, available stack, and an own data-property `cause`. A stack accessor matching the recognized native getter may be read only with plain-string name/message data properties and no custom `Error.prepareStackTrace`. Custom getters remain skipped; a custom stack formatter produces `[Stack unavailable: custom formatter]`.
 - Dates use ISO strings; invalid dates become `[Invalid Date]`.
 - Maps and sets use bounded readable previews through their native iterators.
 - Failed reflection, including throwing or revoked proxies, falls back to `[Unserializable]`. Proxy traps may still execute during reflection.
 - Exhausted budgets use `… [truncated]` where the available space permits it.
 
 These previews are for inspection, not lossless serialization. They can be incomplete JSON; sparse array indices, prototypes, and ordinary non-enumerable properties are not preserved as a full object model. `%s`/`%c` console formatting is not interpreted by the panel.
+
+`previewText` bounds each network body preview to `BODY_BYTES = 16 * 1024`, counting JSON-escaped UTF-8 and fitting the truncation marker inside that allowance. `previewBody` applies the writer and traversal safeguards to already-parsed XHR JSON without an unbounded `JSON.stringify`. `createNetworkEntry` keeps network detail separate from its summary; it does not impose the console entry's whole-record 16 KiB limit on network entries.
 
 ## The bounded store
 
@@ -210,13 +220,14 @@ An append copies up to the configured capacity, and serialization happens synchr
 
 | State | Meaning |
 | --- | --- |
-| `store` | Shared bounded history containing browser and received server entries. |
+| `store` | Shared bounded history containing browser, network, and received server entries. |
 | `users` | Number of active capture-installation leases. |
 | `visible` | Gate controlling whether leased capture is attached. |
 | `controllers` | Identity tokens for mounted scanner roots and their visibility values. |
 | `cleanup` | Current console/window-listener cleanup, if capture is attached. |
+| `network` / `networkCleanup` | Shared network-capture preference and current fetch/XHR teardown. |
 
-`installBrowserCapture()` increments the lease count, optionally changes capacity, and calls `syncCapture`. Its returned cleanup decrements once. This is the public startup API; `getBrowserStore` and `registerBrowserCaptureVisibility` are internal helpers, not public root exports.
+`installBrowserCapture({ maxLogs?, network? })` increments the lease count, optionally changes shared capacity/network preference, and calls `syncCapture`. Its returned cleanup decrements once. This is the public startup API; `getBrowserStore` and `registerBrowserCaptureVisibility` are internal helpers, not public root exports. Network capture defaults to enabled and is attached only while the browser gate and lease count also permit capture.
 
 Capture is attached only when **`users > 0` and the visibility gate is true**. Attachment subscribes to the console wrapper and two window events:
 
@@ -232,6 +243,23 @@ Removing a false controller can resume capture if the remaining controllers are 
 Suspension detaches hooks but preserves the bounded store and lease counts. Cleanup tokens are idempotent, so an older cleanup cannot release a newer installation. Global state reuse preserves these rules across hot reload; initialization also fills fields missing from an older state shape.
 
 Browser installers and visibility registration are no-ops when `window` is absent. Importing the package does not install capture. Startup calls before any installer, or calls while capture is suspended, cannot be reconstructed afterward.
+
+## Standalone mounting and application failures
+
+`src/react/mountLogScanner.tsx` exports `mountLogScanner(options: LogScannerProps): MountedLogScanner`. The handle exposes `update(partialOptions)` and idempotent `dispose()`. This is the recommended browser-bootstrap integration when the viewer must survive application-root render failures.
+
+1. Reuse the global registry slot `Symbol.for('logscan.standalone-root.v1')`, disposing any previous standalone session.
+2. Register visibility ownership and, when active, immediately acquire a browser capture lease before React renders.
+3. Create a hidden empty host element with `data-logscan-root` and call `createRoot` on it. The viewer itself portals into `document.body`. If body is absent, retain capture and wait for `DOMContentLoaded`.
+4. Render `<LogScanner>` in that separate root. Its normal effects own rendering, another shared capture lease, and optional EventSource connection.
+5. Merge updates into the current options. A false visibility owner suspends shared capture immediately, and rendering `null` releases the viewer's React effects. True visibility resumes the same session and renders a fresh active subtree.
+6. On disposal, suspend capture during teardown, unmount the separate root, remove its host and DOM-ready listener, release leases/controllers, and clear the registry only if this session still owns it.
+
+Initial false visibility creates no host/root/stream or capture lease, but registers the same false-owner veto used by the component. Updates after disposal do nothing. Replacement mounts make older handles inert, so stale HMR cleanup cannot dispose the replacement. Browser globals absent means an inert handle without root creation or capture. Call the API during bootstrap, not during component rendering; retain its handle for explicit/HMR teardown.
+
+Application React-root failure or unmount does not own this independent root. DOM portals alone do not provide that protection: a JSX `<LogScanner>` still unmounts with its React ancestor. The scanner observes console calls and window error/rejection events; errors swallowed by an application boundary/catch are invisible unless that code logs them. Its own boundary handles viewer rendering failures, not application recovery.
+
+No in-page viewer can survive navigation/reload, document replacement, a crashed tab, or a blocked JavaScript thread. The standalone integration keeps the React ownership separate; it does not change those browser lifetimes.
 
 ## React rendering and interaction
 
@@ -252,11 +280,11 @@ ActiveScanner
   render the panel and entry rows only while open
 ```
 
-The portal avoids clipping by ordinary application containers. It uses a fixed overlay whose wrapper ignores pointer input; the panel and launcher explicitly accept it. It is a **nonmodal region**, so the application remains interactive and focus is not trapped.
+The portal avoids clipping by ordinary application containers. It remains part of its originating React tree. The fixed overlay uses the package's high stacking layer; its wrapper ignores pointer input while panel and launcher explicitly accept it. It is a **nonmodal region**, so the application remains interactive and focus is not trapped.
 
-Local state includes open/closed, search, level/source selection, and clipboard status. Geometry is owned by its hook. Closing preserves filters and geometry, clears clipboard feedback, and unmounts the rows and their disclosure/copy state. Disabling removes `ActiveScanner`, releasing its effects and resetting local state for the next activation. The shared log history has a longer lifetime.
+Local state includes open/closed, search, level/source selection, expanded filter controls, and clipboard status. Closing preserves filters and geometry, clears clipboard feedback, and unmounts the rows and their disclosure/copy state. Disabling removes `ActiveScanner`, releasing its effects and resetting transient state. Geometry and the expanded-filter preference can restore from sessionStorage; shared log history has a longer in-memory lifetime.
 
-While open, filtering combines an exact level, exact source, and case-insensitive substring match against `entry.message`. The header's error count uses all retained entries, while the footer reports matching entries versus total entries. Clear empties the entire store, not only the filtered subset.
+Search and Clear are always visible. Level/Source controls default to collapsed unless this tab remembers an expanded preference. Their toggle counts active level/source selections, and Reset clears search plus both selections. While open, filtering combines exact level/source with case-insensitive substring search across `entry.message` and the network URL/request/response preview fields. Collapsing controls does not clear their filters. The header shows the captured total; the footer reports matching versus total entries. Clear empties the entire store, not only the filtered subset.
 
 Search receives focus after the first geometry measurement makes the panel visible. Escape or close returns focus to the launcher. The error boundary renders a retry fallback if the scanner subtree fails; it does not replace the host application's own error handling or catch every asynchronous application failure.
 
@@ -264,15 +292,40 @@ Search receives focus after the first geometry measurement makes the panel visib
 
 ### Entry presentation and copying
 
-`src/react/LogEntryRow.tsx` renders local-time timestamps, textual level/source labels, a two-line message preview, a copy button, and native `<details>` inspection. Argument blocks render only after expanding the row. Text is rendered through React; log contents are not inserted as HTML.
+`src/react/LogEntryRow.tsx` renders local-time timestamps, textual level/source labels, a scrollable multiline console preview or network summary, copy controls, and native `<details>` inspection. Detail blocks render only after expansion. Network response/error appears before request body, URL, and content type. A response-copy button remains available while details are closed. Text and highlighted tokens are rendered through React, never inserted as HTML.
 
-Copy uses `navigator.clipboard.writeText` with:
+`src/react/formatLog.ts` validates complete JSON objects/arrays, then indents their original lexical tokens rather than serializing the parsed value. Numeric precision/exponent spelling, key order/duplicate keys, and string escaping are preserved. Invalid or truncated JSON remains unchanged. Formatting falls back to the input beyond depth 20 or 65,536 output characters; highlighting has its own length fallback.
+
+Full console copy uses `navigator.clipboard.writeText` with this header, then formatted arguments separated by newlines (or `entry.message` when there are no arguments):
 
 ```text
-[ISO timestamp] [source] [level] message
+[ISO timestamp] [source] [level] formatted text
 ```
 
-Each operation gets an incrementing local operation number and a symbol shared with the footer status. The active flag and operation number prevent completions from updating an unmounted/stale row; the symbol prevents an earlier copy from overwriting a later row's status. The button disables while pending. Failure produces a manual-copy message rather than logging into the collector itself.
+Full network copy additionally includes initiator, status, duration, URL/content type, and captured body/error sections. Response/error and per-section Copy buttons use the same formatted section text shown on screen. Empty captured responses remain copyable. Only captured previews are copied; truncated or skipped body markers do not represent a full payload.
+
+Each operation gets an incrementing local operation number and a symbol shared with the footer status. The active flag and operation number prevent completions from updating an unmounted/stale row; the symbol prevents an earlier copy from overwriting a later row's status. All copy buttons in that row disable while pending. Failure produces a manual-copy message rather than logging into the collector itself.
+
+## Network capture
+
+`src/browser/network.ts` shares ref-counted fetch/XHR interception through a global symbol registry. The fetch wrapper returns the original promise and response to the caller. Its fulfilment/rejection observers never change the caller's outcome. Request strings and URLSearchParams are previewed; FormData/file/blob/buffer inputs are described. A `Request` object's consumable body is left unread.
+
+Header inspection selects eligible fetch bodies before cloning: textual content types are eligible; event streams, non-text types, and declared lengths above 512 KiB get description markers. Cloning occurs synchronously in the response observer before the application's handlers attached to this returned promise normally run. A prior integration can still have consumed the body, so clone failures are handled.
+
+| Fetch preview bound | Behavior |
+| --- | --- |
+| Stored body text | 16 KiB per preview, counting JSON-escaped UTF-8; truncation marker fits inside the budget |
+| Stream bytes retained | At most 16 KiB from a clone reader; no full `clone.text()` buffering |
+| Concurrent clone previews | Eight; further responses emit metadata with `[body preview skipped: busy]` without cloning |
+| Timeout | Two seconds, then `[body preview timed out]` and cloned-reader cancellation |
+| Clone/read failure | `[body preview unavailable]` |
+| Header-based skips | `[content-type stream]`, `[content-type]`, `[unknown content type]`, or `[N bytes not captured]` |
+
+There is no response-order promise queue. Completed previews emit independently; fast later previews can appear before slow earlier ones. Each retains the timestamp and duration recorded when its response settled, so store arrival order can differ from timestamps. Skipped previews and failed fetches emit without waiting for a body read. `createNetworkEntry` grades failures/5xx as error, 4xx as warn, and other response statuses as info.
+
+XHR emits at `loadend`: zero status marks failure, text response types use bounded text, JSON uses `previewBody` with depth/child safeguards, and other response types are described. XHR previewing does not use the fetch clone-reader concurrency/timeout machinery.
+
+Final network capture release marks the wrappers inactive, cancels owned clone readers/timeouts, prevents later appends/new clones, and removes tracked XHR loadend listeners. It restores fetch/XHR methods only if they remain owned by this integration. The application's original requests and response readers are not aborted by scanner teardown.
 
 ## Moving and resizing
 
@@ -283,10 +336,10 @@ Each operation gets an incrementing local operation number and a symbol shared w
 | Initial size | Up to 640 × 512 pixels |
 | Normal minimum | 320 × 280, reduced if the viewport is smaller |
 | Outer gutter | 12 pixels below viewport width 640; otherwise 20, reduced for extremely small viewports |
-| Bottom reserved space | Up to 56 pixels for the 48-pixel launcher and an 8-pixel gap |
+| Launcher-edge reserved space | Up to 56 pixels for the 48-pixel launcher and an 8-pixel gap; top or bottom according to `position` |
 | Keyboard step | 10 pixels; 1 with Shift |
 
-Initial placement is bottom-right above the launcher. Measurement occurs in an effect while open. Before the first measurement, the panel is hidden; its focus/scroll effects wait for dimensions. Window resize clamps the retained geometry into the new available space.
+With no remembered rectangle, initial placement docks into the launcher's chosen corner, bottom-right by default. Measurement occurs in an effect while open. Stored geometry is validated as four finite numbers and clamped to the current viewport and launcher edge. Before the first measurement, the panel is hidden; focus/scroll effects wait for dimensions. Window resize clamps retained geometry into the new available space.
 
 The header button starts a drag, the bottom-right button resizes with the top-left anchored, and the top-left button resizes with the right/bottom anchored. All calculations clamp the full rectangle to viewport bounds. This supports growing a panel that initially touches the available right/bottom edges.
 
@@ -300,11 +353,11 @@ Gesture handling:
 
 Pointer capture keeps movement attached to the handle outside its visible bounds. The resize listener exists only while open. Arrow keys operate the focused handle; Alt/Ctrl/Meta combinations are ignored, and Escape is left for the parent to close the panel.
 
-Refs hold the latest geometry and gesture for event handlers; state drives rendering. Inline styles contain only dynamic position/size (and initial visibility). Tailwind controls the visual styling. Geometry survives closing/reopening but resets with the active subtree and is never written to localStorage.
+Refs hold the latest geometry and gesture for event handlers; state drives rendering. Inline styles contain only dynamic position/size and initial visibility. Tailwind controls visual styling. `logscan.panel-geometry.v1` in sessionStorage remembers settled gestures and keyboard adjustments; storage failure falls back to in-memory behavior. No log payloads or geometry are written to localStorage.
 
 ## Node capture and streaming
 
-`src/node/index.ts` exposes `createNodeLogScanner(options?)`. It returns a request handler and `dispose()`; it does not create or listen on an HTTP server.
+`src/node/index.ts` exposes `createNodeLogScanner(options?)`. It returns `{ path, handleRequest, dispose }`; it does not create or listen on an HTTP server.
 
 Capture starts only when `options.enabled === true` and `NODE_ENV !== 'production'`. It uses the shared console wrapper and serializer with `source: 'server'`. It does not register Node uncaught-exception handlers or alter process exit behavior.
 
@@ -329,7 +382,7 @@ The blank line terminates the SSE event. History holds these frames, trimming ol
 | Already 32 clients on this adapter | 503 with `Retry-After: 10` |
 | Accepted request | 200, `text/event-stream; charset=utf-8` |
 
-The path is `/__log-scanner/events`; query parameters do not change the path match. Both the actual socket address and Host must be local. Accepted loopback forms include localhost, IPv4 loopback, IPv6 `::1`, and IPv4-mapped loopback addresses.
+The default path is `/__log-scanner/events`, configurable through `options.path` and returned as `scanner.path`. Normalization adds a missing leading slash and drops query/fragment and a trailing slash. Query parameters do not change incoming path matching. Both the actual socket address and Host must be local. Accepted loopback forms include localhost, IPv4 loopback, IPv6 `::1`, and IPv4-mapped loopback addresses.
 
 A supplied Origin must be a local HTTP(S) origin matching the request's protocol/host/port or an entry in `allowedOrigins`. An absent Origin is accepted. Invalid/non-local allowlist entries are ignored. This is a local-development boundary, not an authentication system for a remote deployment.
 
@@ -387,7 +440,10 @@ Connection states are `browser-only`, `connecting`, `connected`, `reconnecting`,
 | --- | --- | --- |
 | Console wrapper subscription | Browser collector or Node adapter | Last owned listener leaves; restore only wrappers still owned |
 | Browser error/rejection listeners | Shared browser capture state | Gate becomes false or final capture lease releases |
-| Visibility controller token | `LogScanner` effect | Prop change or component unmount |
+| Fetch/XHR patches and clone preview tasks | Shared network capture registry | Network disabled, capture suspended, or final lease release |
+| Visibility controller token | `LogScanner` effect or standalone session | Prop/update change, unmount, replacement, or disposal |
+| Independent React root/container | `mountLogScanner` session | Explicit disposal or replacement mount |
+| Pending DOM-ready listener | Standalone session before body exists | Body becomes ready, hidden update, or disposal |
 | React store subscription | `useSyncExternalStore` | Active subtree unmount |
 | Store notification timeout | `createLogStore` | Delivery, last unsubscribe, or store disposal |
 | SSE connection and client ID set | `useServerLogs` effect | URL change, disable, or active subtree unmount |
@@ -396,7 +452,7 @@ Connection states are `browser-only`, `connecting`, `connected`, `reconnecting`,
 | Node pending queue and stall timer | Individual stream client | Disconnect, overflow, timeout, write failure, or adapter disposal |
 | Node heartbeat and retained history | Node adapter | `dispose()` |
 | Demo fetch request | Example `App` | Completion or abort on unmount |
-| Demo startup capture lease | Example entry module | Vite hot disposal; root visibility can also suspend attachment |
+| Demo standalone scanner | Example entry module | Vite hot disposal; application controls use its update handle |
 
 Retained browser history intentionally outlives the UI. Node history intentionally outlives browser connections. These are separate bounded lifetimes, not evidence of active browser capture after `visible={false}`.
 
@@ -420,23 +476,13 @@ The browser build externalizes React, ReactDOM, `clsx`, and `react-error-boundar
 
 The Node build targets Node 22, externalizes `node:` imports, and sets `emptyOutDir: false` so it does not delete browser artifacts. TypeScript emits declarations only in the final step, excluding examples and tests. Source imports use `.js` extensions that resolve against TypeScript during development and remain appropriate for emitted ESM.
 
-`src/styles.css` imports only Tailwind theme/utilities, uses the `ls:` prefix, and scans `src/react`. It omits Preflight. The compiled stylesheet is a separate export, and `package.json` marks CSS as side-effectful so consumer bundlers retain explicit stylesheet imports. The example uses an independent `demo:` prefix.
-
-### Network capture
-
-`src/browser/network.ts` wraps `window.fetch` and `XMLHttpRequest.prototype.open/send` behind the same ref-counted, HMR-safe registry pattern as console capture. Three constraints shape it:
-
-1. **The caller keeps its response.** The wrapper returns the original promise and never awaits before returning. Observers attach with both fulfilment and rejection handlers, so a failing request stays rejected for the application without producing an unhandled rejection from the wrapper.
-2. **Cloning is synchronous.** `planBody` decides from headers alone whether a body is worth teeing, and `response.clone()` runs inside the settle handler — registered before the caller's own handlers, so the body is still guaranteed unread. Deferring the clone would race the application's `await response.json()`.
-3. **Ordering follows responses, not body reads.** Previews resolve at different speeds, so entries queue through a promise chain and each carries the timestamp of the moment its response settled. A stalled preview is abandoned after two seconds so it cannot hold up the queue, and `text/event-stream` is never read at all.
-
-Status codes map onto levels in `createNetworkEntry`, which keeps a searchable one-line `message` while structured detail stays in `entry.network`. XHR emits synchronously from `loadend`, where a zero status means the request never completed.
+`src/styles.css` imports only Tailwind theme/utilities, uses the `ls:` prefix, and scans `src/react`. It omits Preflight. `injectStyles.ts` imports compiled CSS through `?inline` and adds one `<style id="logscan-styles">` to the document head when a viewer activates. This shared style element remains after disposal. The stylesheet is also a separate optional export, and `package.json` marks CSS as side-effectful. Prefixing reduces collisions but does not provide Shadow DOM isolation. The example uses an independent `demo:` prefix.
 
 ### Panel geometry persistence
 
 `usePanelGeometry` writes the rectangle to `sessionStorage` when a gesture settles rather than on every pointer sample, and reads it back when the panel next opens. Stored values are hand-editable, so they are validated as four finite numbers and then clamped to the current viewport. `src/react/session.ts` owns every storage call: disabled, partitioned, or quota-exhausted storage degrades to an in-memory session instead of preventing the panel from opening.
 
-The collapsed state of the filter toolbar persists through the same helper. Collapsing only hides the controls — the current search, level, and source keep filtering — so the header toggle carries a dot whenever a filter is narrowing the list, and the footer's `matching / captured` count stays visible. With the toolbar collapsed there is no search field to receive focus when the panel opens, so focus moves to the log list region instead.
+The expanded Level/Source preference persists through the same helper. It defaults to collapsed; Search and Clear stay visible either way. Search, level, and source values remain transient, while the toggle and matching/captured count indicate active filtering. Search receives focus when the panel opens.
 
 `boundsFor` reserves the launcher's corner on whichever edge it occupies, so a `top-*` position pushes the panel's top edge down instead of letting it slide underneath the launcher.
 
@@ -450,7 +496,7 @@ Both library builds disable copying the public directory, so the unused original
 
 ### Package manifest and archives
 
-`package.json` exposes the browser root, `/node`, `/styles.css`, and `/package.json`. There are no supported deep-import entry points for store, geometry, serializer, or capture internals. Root public types include `LogScannerProps`, `LauncherPosition`, `LogEntry`, `LogLevel`, `LogSource`, and `NetworkInfo`; the Node entry exports its options/adapter types.
+`package.json` exposes the browser root, `/node`, `/styles.css`, and `/package.json`. There are no supported deep-import entry points for store, geometry, serializer, or capture internals. Root public types include `MountedLogScanner`, `LogScannerProps`, `LauncherPosition`, `LogEntry`, `LogLevel`, `LogSource`, and `NetworkInfo`; the Node entry exports its options/adapter types.
 
 Only `dist`, `README.md`, and `flow.md` are explicitly included by the files allowlist. npm also includes its standard manifest metadata. The manifest names the package `logscan`, sets `private: false` to permit publishing, and declares `MIT` as its license. Consumers import the browser entry from `logscan`, the Node entry from `logscan/node`, and compiled CSS from `logscan/styles.css`.
 
@@ -458,27 +504,30 @@ Only `dist`, `README.md`, and `flow.md` are explicitly included by the files all
 
 ## File-by-file guide
 
-Read the source in this order to follow one browser message: `types.ts` → `console.ts` → `serialize.ts` → `store.ts` → `browser/index.ts` → `LogScanner.tsx` → `LogEntryRow.tsx`. Then read `node/index.ts` and `useServerLogs.ts` for the transport path, followed by geometry and build files.
+Read the source in this order to follow one browser message: `types.ts` → `console.ts` → `serialize.ts` → `store.ts` → `browser/index.ts` → `mountLogScanner.tsx` / `LogScanner.tsx` → `LogEntryRow.tsx` / `formatLog.ts`. Then read `network.ts` for body capture and `node/index.ts` / `useServerLogs.ts` for server transport, followed by geometry and build files.
 
 ### Library source and assets
 
 | File | Responsibility |
 | --- | --- |
-| `src/index.ts` | Public React entry and type exports, plus the startup capture export. Contains a client directive; does not install capture on import. |
+| `src/index.ts` | Public standalone mount, React component, startup capture, and type exports. Contains a client directive; does not install capture on import. |
 | `src/core/types.ts` | Shared log levels, sources, entry shape, and capacity normalization. |
 | `src/core/console.ts` | Global per-console wrapper registry, listener tokens, forwarding, reentrancy protection, and owned-wrapper restoration. |
 | `src/core/serialize.ts` | Bounded preview writer, object traversal, error/special-value handling, IDs, timestamps, and immutable entry construction. |
 | `src/core/store.ts` | Immutable bounded history, subscription snapshots, 16 ms notification batching, clear/resize/dispose. |
-| `src/browser/index.ts` | Browser singleton state, startup leases, visibility controllers, console attachment, error/rejection listeners. |
+| `src/browser/index.ts` | Browser singleton state, startup leases, visibility controllers, console/network attachment, error/rejection listeners. |
 | `src/node/index.ts` | Public Node API, local-access checks, frame history, SSE handler, replay, backpressure, and disposal. |
 | `src/react/LogScanner.tsx` | Public props, visibility ownership, error boundary, active capture, portal, launcher, toolbar, filtering, focus, and following. |
-| `src/react/LogEntryRow.tsx` | One entry's metadata/message, lazy argument inspection, clipboard operation and status ownership. |
+| `src/react/mountLogScanner.tsx` | Independent React root, immediate capture, update/dispose handle, singleton replacement, body-ready wait, and SSR no-op. |
+| `src/react/LogEntryRow.tsx` | One entry's metadata/message, lazy section inspection, response/section/full copy controls, and clipboard ownership. |
+| `src/react/formatLog.ts` | JSON token formatting without numeric rewriting, ordered detail sections, and complete copy text. |
 | `src/react/useServerLogs.ts` | EventSource effect, URL checks, payload validation, duplicate suppression, connection state, and teardown. |
 | `src/react/usePanelGeometry.ts` | Initial/clamped rectangles, primary-pointer ownership, drag/resize calculations, keyboard adjustments, and viewport changes. |
-| `src/browser/network.ts` | Ref-counted fetch/XHR interception, body planning and preview reads, and response-ordered emission. |
+| `src/browser/network.ts` | Ref-counted fetch/XHR interception, bounded concurrent clone reads, skip/timeout markers, completion-order emission, and preview cancellation. |
 | `src/react/highlight.tsx` | Token colouring for serialized previews, with a length ceiling that falls back to plain text. |
 | `src/react/session.ts` | Guarded sessionStorage reads/writes shared by panel geometry and the toolbar toggle. |
 | `src/react/logo.tsx` | Inline SVG brand mark with optional accessible label. |
+| `src/react/injectStyles.ts` | One-time document-head injection of compiled inline CSS when a viewer activates. |
 | `src/assets.d.ts` | Type declaration for `*.css?inline` imports, including declaration-only builds without Vite client types. |
 | `src/styles.css` | Prefixed library Tailwind entry with explicit component scanning and no reset. |
 | `public/image-1.png`, `public/image-1(1).png` | Earlier supplied images, kept in the checkout only; no library or example source imports them and library builds do not copy this directory. |
@@ -488,16 +537,16 @@ Read the source in this order to follow one browser message: `types.ts` → `con
 | File | Responsibility |
 | --- | --- |
 | `examples/index.html` | HTML document, viewport metadata, React root, module entry, and page-level demo utility classes. |
-| `examples/main.tsx` | Startup capture, StrictMode/error-boundary root, sample logging actions, visibility toggle, server-request UI, and an integration snippet using the package name from the manifest. |
+| `examples/main.tsx` | Standalone scanner bootstrap, separate StrictMode app root, caught/uncaught crash scenarios, sample logging, update-based visibility controls, server-request UI, and package-name integration snippet. |
 | `examples/styles.css` | Independent `demo:` Tailwind theme/utilities, scanning the example HTML and React source. |
 | `examples/server.ts` | Express on `127.0.0.1:4318`, conditional SSE route, `/api/health`, validated `/api/check`, and shutdown. |
 | `examples/vite.config.ts` | Vite example root, React/Tailwind plugins, client port 5173, `/api` and `/__log-scanner` proxies, and `example-dist` output. |
 | `scripts/dev.mjs` | Spawn client and server commands, inherit their output, and coordinate termination when either exits or the parent receives a signal. |
 | `scripts/verify-package.mjs` | Pack the build, create isolated consumer projects, install dependencies, compile consumer types, and audit SSR/dependencies/assets/browser graphs. |
 
-The example's startup collector runs before React mounting, with a Vite hot-disposal cleanup. `?disabled` starts without it. The root still controls any active startup lease through `visible`.
+The example mounts its standalone scanner before rendering the separate application root. Vite hot disposal releases both roots. `?disabled` starts with the scanner hidden; application controls update the retained handle. The normal application boundary logs caught render failures; `?uncaught` omits that boundary to exercise an uncaught application-root failure while the viewer remains available.
 
-**Run server check** posts `{ message }` to `/api/check`. The browser logs outgoing data, awaits a response with an `AbortController`, logs the result, and updates its request status. The server validates the string, emits its own console calls, and returns a request ID, uptime, and Node version. Unmount aborts the browser request. SSE then delivers the server's console entries independently of the fetch response.
+**Run server check** posts `{ message }` to `/api/check`. The browser logs outgoing data, awaits a response with an `AbortController`, logs the result, and updates its request status. The server validates the string, emits its own console calls, and returns a request ID, uptime, Node version, and the nested request message. Unmount aborts the browser request. SSE then delivers the server's console entries independently of the fetch response.
 
 The example backend opts in whenever `NODE_ENV` is not production; the README's consumer example uses the stricter explicit `NODE_ENV=development` check. The library itself always requires explicit `enabled: true` and refuses capture in production.
 
@@ -523,11 +572,14 @@ The example backend opts in whenever `NODE_ENV` is not production; the README's 
 | --- | --- |
 | `tests/core.test.ts` | Bounded snapshots, unusual values/proxies, wire-size limits, immutable IDs/text, store batching, wrappers, reentrancy, and module reload behavior. |
 | `tests/browser.test.ts` | Startup leases, window events, repeated cleanup, hot reload, visibility suspension/resumption, and final-root teardown. |
-| `tests/react.test.tsx` | Logo launcher, launcher position and stacking, prop precedence, disabled/SSR behavior, StrictMode, filters/focus/colouring, stream validation/replay, clipboard races, and scrolling. |
+| `tests/mount.test.tsx` | Independent app-root crash survival, immediate capture, update/dispose, hidden SSE cleanup, replacement/HMR ownership, app StrictMode, and body-ready cancellation. |
+| `tests/mount-ssr.test.ts` | Inert standalone factory, updates, and disposal without browser globals. |
+| `tests/react.test.tsx` | Logo launcher, position/stacking, prop precedence, disabled/SSR behavior, StrictMode, persistent collapsed-filter preference, body search, stream validation/replay, clipboard races, and scrolling. |
+| `tests/log-entry-row.test.tsx` | Exact JSON numeric tokens/escaping, readable stacks and bodies, safe text rendering, full/section/response copying, empty response, and asynchronous row teardown. |
 | `tests/geometry.test.tsx` | Viewport bounds, launcher-corner docking, keyboard steps, anchored resizing, pointer cancellation, stored-rectangle restore and rejection, and listener/capture cleanup. |
-| `tests/network.test.ts` | Request description, status-to-level grading, untouched caller bodies, non-text and cross-origin handling, shared patches, and observer isolation. |
+| `tests/network.test.ts` | Request/status capture, 16 KiB preview bounds, eight-reader concurrency, completion ordering, timeout/cancellation, untouched caller bodies, XHR behavior, and shared wrapper ownership. |
 | `tests/node.test.ts` | Real HTTP streaming, opt-in/production guards, local-access rejection, history/cursors, shared interception, client disposal, queue overflow, and healthy replay draining. |
-| `e2e/scanner.spec.ts` | Real playground integration: capture, server source filtering, copy/inspection, history/scrolling, disabled mode, mobile layout, logo, drag/resize, and keyboard behavior. Also writes screenshots. |
+| `e2e/scanner.spec.ts` | Real browser capture, server filters, body search/copy, caught and uncaught app crashes with surviving viewer, history/scrolling, disabled mode, mobile layout, geometry, and keyboard behavior. Also writes screenshots. |
 
 ### Generated files
 
@@ -560,10 +612,10 @@ The packed-package check verifies a different boundary: code working from the re
 4. Generates separate React 18.3.1 and locally installed React 19 consumer projects under `artifacts/`.
 5. Installs each consumer and typechecks with both Bundler and NodeNext module resolution, with `skipLibCheck: false`.
 6. Checks that the scanner, error boundary, and host resolve the same React/ReactDOM installations.
-7. Imports/renders on the server to confirm no browser interception or rendered panel, and checks disabled/production Node behavior.
-8. Builds a consumer without Tailwind, inspects its module graph for Node leakage or extra React installations, and verifies that it emits the original PNG. Browser/Node entry checks use the installed package's resolved paths, so they follow package renames automatically.
+7. Imports/renders on the server to confirm no browser interception or rendered panel, exercises inert standalone mount/update/dispose, and checks disabled/production Node behavior.
+8. Builds a consumer without Tailwind, inspects its module graph for Node leakage or extra React installations, and verifies that inline SVG produces no image assets. Browser/Node entry checks use installed resolved paths, so they follow package renames automatically.
 
-The package fixtures currently exercise the legacy `enabled` prop. `visible` precedence and browser shutdown are covered by dedicated React/browser tests. Neither smoke builds nor unit tests replace the real browser interaction tests.
+Package fixtures compile the component's legacy `enabled` prop and the standalone `MountedLogScanner` API. Dedicated React/browser suites verify `visible` precedence and shutdown, while standalone and real-browser tests verify app-crash isolation. Smoke builds and unit tests do not replace browser interaction tests.
 
 For a complete local verification:
 
@@ -582,7 +634,8 @@ This runs typecheck, unit tests, library build, E2E tests, and packed-consumer c
 | New log level | `core/types.ts` | Wrapper methods, row styles, filters, incoming validation, and tests must agree. |
 | Different preview format/limit | `core/serialize.ts` | Wire-size bound, getter handling, unusual values, and client validation compatibility. |
 | Different history policy | `core/store.ts` and Node frame history | Immutable stable snapshots, capacity bounds, notification batching, and replay behavior. |
-| Visibility/lifetime behavior | `browser/index.ts` and `LogScanner.tsx` | Startup leases, StrictMode, HMR, existing history, and cleanup ownership. |
+| Visibility/lifetime behavior | `browser/index.ts`, `mountLogScanner.tsx`, and `LogScanner.tsx` | Standalone root ownership, startup leases, StrictMode, HMR, history, and cleanup. |
+| Body capture or formatting | `browser/network.ts`, `core/serialize.ts`, and `react/formatLog.ts` | Preview budgets/concurrency, caller response ownership, exact JSON tokens, copy output, and cancellation. |
 | Panel appearance | React component classes and `src/styles.css` | Prefixed styles, no reset, labels/focus, and narrow resized layouts. |
 | Drag/resize behavior | `usePanelGeometry.ts` | Anchored edges, tiny viewports, keyboard parity, single-pointer ownership, and teardown. |
 | Stream protocol | `node/index.ts` and `useServerLogs.ts` together | Matching shape/limits, cursor replay, bounded duplicate tracking, backpressure, and cleanup. |
@@ -590,4 +643,4 @@ This runs typecheck, unit tests, library build, E2E tests, and packed-consumer c
 
 Core capture code deliberately avoids routine debug logging into intercepted methods. Reentrant capture, repeated connection failures, and subscriber failures can otherwise generate noisy feedback or hide the original problem. Use isolated tests and the existing original-console reporting path when investigating that layer.
 
-There is no row virtualization, persistence layer, network inspector, subprocess collector, or Pino/Winston bridge in this version. Those features would require explicit new boundaries and tests; the current bounded array and lazy argument rendering serve the local console use case.
+There is no row virtualization, persistent log store, full network recorder, subprocess collector, or Pino/Winston bridge in this version. Current network support is bounded fetch/XHR metadata and body previews; sessionStorage contains UI preferences only.

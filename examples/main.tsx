@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { ErrorBoundary } from 'react-error-boundary';
 import clsx from 'clsx';
 import { name as packageName } from '../package.json';
-import { LogScanner, installBrowserCapture } from '../src/index.js';
+import { mountLogScanner } from '../src/index.js';
 import { LogScannerLogo } from '../src/react/logo.js';
 import '../src/styles.css';
 import './styles.css';
@@ -12,9 +12,8 @@ const params = new URLSearchParams(location.search);
 const initiallyVisible = import.meta.env.DEV && !params.has('disabled');
 const launcherPositions = ['bottom-right', 'bottom-left', 'top-right', 'top-left'] as const;
 const requestedPosition = launcherPositions.find((value) => value === params.get('position')) ?? 'bottom-right';
-const releaseStartupCapture = initiallyVisible ? installBrowserCapture() : () => {};
+const scanner = mountLogScanner({ visible: initiallyVisible, serverUrl: '/__log-scanner/events', position: requestedPosition });
 if (initiallyVisible) console.info('Log Scanner is ready. Browser capture started before React mounted.');
-if (import.meta.hot) import.meta.hot.dispose(releaseStartupCapture);
 
 const buttonClass = 'demo:shrink-0 demo:cursor-pointer demo:rounded-lg demo:border demo:border-solid demo:border-stone-300 demo:bg-white demo:px-3 demo:py-2 demo:text-xs demo:font-medium demo:leading-5 demo:text-stone-800 demo:transition-colors demo:hover:bg-stone-100 demo:focus-visible:outline-2 demo:focus-visible:outline-offset-4 demo:focus-visible:outline-stone-800 demo:disabled:cursor-wait demo:disabled:opacity-60';
 const sectionClass = 'demo:overflow-hidden demo:rounded-lg demo:border demo:border-solid demo:border-stone-200 demo:bg-white';
@@ -66,11 +65,14 @@ const browserActions = [
 
 function App() {
   const [visible, setVisible] = useState(initiallyVisible);
+  const [crashed, setCrashed] = useState(false);
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState('Ready for a request.');
   const request = useRef<AbortController | null>(null);
 
   useEffect(() => () => request.current?.abort(), []);
+
+  if (crashed) throw new Error('Demo application render failed. The independent console is still available.');
 
   async function checkServer() {
     if (request.current) return;
@@ -103,7 +105,9 @@ function App() {
   }
 
   function toggleScanner() {
-    setVisible((value) => !value);
+    const next = !visible;
+    scanner.update({ visible: next });
+    setVisible(next);
   }
 
   return (
@@ -129,6 +133,7 @@ function App() {
         <div className="demo:mb-8 demo:sm:mb-10">
           <h1 className="demo:m-0 demo:text-3xl demo:font-semibold demo:leading-tight demo:tracking-tight">Console playground</h1>
           <p className="demo:mb-0 demo:mt-3 demo:max-w-2xl demo:text-sm demo:leading-6 demo:text-stone-600">Generate a browser log or make a server request. Inspect the output in the scanner at the bottom right.</p>
+          <button type="button" className={clsx(buttonClass, 'demo:mt-4')} onClick={() => setCrashed(true)}>Crash demo app</button>
         </div>
 
         <div className="demo:grid demo:items-start demo:gap-6 demo:lg:grid-cols-5">
@@ -185,25 +190,31 @@ function App() {
         <section aria-labelledby="integration-title" className="demo:mt-8 demo:grid demo:gap-4 demo:border-0 demo:border-t demo:border-solid demo:border-stone-200 demo:pt-6 demo:lg:grid-cols-5 demo:lg:gap-6">
           <div className="demo:lg:col-span-2">
             <h2 id="integration-title" className="demo:m-0 demo:text-sm demo:font-medium">Add it to your app</h2>
-            <p className="demo:mb-0 demo:mt-2 demo:max-w-xs demo:text-xs demo:leading-6 demo:text-stone-500">Mount the scanner once at the root. Use your development flag to enable capture.</p>
+            <p className="demo:mb-0 demo:mt-2 demo:max-w-xs demo:text-xs demo:leading-6 demo:text-stone-500">Start the console before rendering your app. Its separate React root stays available if the app crashes.</p>
           </div>
-          <pre className="demo:m-0 demo:overflow-x-auto demo:rounded-lg demo:border demo:border-solid demo:border-stone-200 demo:bg-white demo:p-4 demo:font-mono demo:text-xs demo:leading-6 demo:text-stone-700 demo:lg:col-span-3"><code>{`import { LogScanner } from '${packageName}';
-import '${packageName}/styles.css';
+          <pre className="demo:m-0 demo:overflow-x-auto demo:rounded-lg demo:border demo:border-solid demo:border-stone-200 demo:bg-white demo:p-4 demo:font-mono demo:text-xs demo:leading-6 demo:text-stone-700 demo:lg:col-span-3"><code>{`import { mountLogScanner } from '${packageName}';
 
-<LogScanner visible={import.meta.env.DEV} />`}</code></pre>
+const scanner = mountLogScanner({ visible: import.meta.env.DEV });
+import.meta.hot?.dispose(() => scanner.dispose());`}</code></pre>
         </section>
       </main>
-      <LogScanner visible={visible} serverUrl="/__log-scanner/events" position={requestedPosition} />
     </>
   );
 }
 
 const root = document.getElementById('root');
 if (!root) throw new Error('The example root element is missing.');
-createRoot(root).render(
+const appRoot = createRoot(root);
+appRoot.render(
   <StrictMode>
-    <ErrorBoundary fallback={<p role="alert">The playground could not render. Reload to try again.</p>}>
-      <App />
-    </ErrorBoundary>
+    {params.has('uncaught') ? <App /> : (
+      <ErrorBoundary
+        onError={(error, info) => console.error('Application render failed', error, info.componentStack)}
+        fallback={<p role="alert" className="demo:p-6">The playground crashed. Open the console to inspect and copy the error. Reload to try again.</p>}
+      >
+        <App />
+      </ErrorBoundary>
+    )}
   </StrictMode>,
 );
+import.meta.hot?.dispose(() => { scanner.dispose(); appRoot.unmount(); });

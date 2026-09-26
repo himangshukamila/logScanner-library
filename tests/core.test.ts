@@ -36,6 +36,66 @@ describe('safe log snapshots', () => {
     expect(entry.args[2]).toBe('[Invalid Date]');
   });
 
+  it('preserves native Error stack frames, including native stack accessors', () => {
+    const formatter = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
+    let snapshot = '';
+    try {
+      Object.defineProperty(Error, 'prepareStackTrace', { configurable: true, writable: true, value: undefined });
+      function nativeErrorLocation() { return new Error('native stack frames'); }
+      snapshot = createLogEntry('browser', 'error', [nativeErrorLocation()]).message;
+    } finally {
+      if (formatter) Object.defineProperty(Error, 'prepareStackTrace', formatter);
+      else Reflect.deleteProperty(Error, 'prepareStackTrace');
+    }
+    expect(snapshot).toContain('Error: native stack frames');
+    expect(snapshot.match(/Error: native stack frames/g)).toHaveLength(1);
+    expect(snapshot).toMatch(/\n\s+at nativeErrorLocation/);
+    expect(snapshot).not.toContain('[Getter]');
+  });
+
+  it('never invokes custom stack/name/message getters or their coercion hooks', () => {
+    const formatter = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
+    const getter = vi.fn(() => { throw new Error('custom getter must not run'); });
+    const toString = vi.fn(() => 'coerced message');
+    const snapshots: string[] = [];
+    try {
+      Object.defineProperty(Error, 'prepareStackTrace', { configurable: true, writable: true, value: undefined });
+      for (const key of ['stack', 'name', 'message']) {
+        const error = new Error('safe original message');
+        Object.defineProperty(error, key, { configurable: true, get: getter });
+        snapshots.push(createLogEntry('browser', 'error', [error]).message);
+      }
+      const error = new Error('original');
+      Object.defineProperty(error, 'message', { configurable: true, value: { toString } });
+      createLogEntry('browser', 'error', [error]);
+    } finally {
+      if (formatter) Object.defineProperty(Error, 'prepareStackTrace', formatter);
+      else Reflect.deleteProperty(Error, 'prepareStackTrace');
+    }
+    expect(snapshots.every((snapshot) => snapshot.includes('[Getter]'))).toBe(true);
+    expect(getter).not.toHaveBeenCalled();
+    expect(toString).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke Error.prepareStackTrace functions or accessors to serialize errors', () => {
+    const original = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
+    const formatter = vi.fn(() => 'custom stack');
+    const getter = vi.fn(() => formatter);
+    const snapshots: string[] = [];
+    try {
+      Object.defineProperty(Error, 'prepareStackTrace', { configurable: true, writable: true, value: formatter });
+      snapshots.push(createLogEntry('browser', 'error', [new Error('function formatter')]).message);
+      Object.defineProperty(Error, 'prepareStackTrace', { configurable: true, get: getter });
+      snapshots.push(createLogEntry('browser', 'error', [new Error('accessor formatter')]).message);
+    } finally {
+      if (original) Object.defineProperty(Error, 'prepareStackTrace', original);
+      else Reflect.deleteProperty(Error, 'prepareStackTrace');
+    }
+    expect(formatter).not.toHaveBeenCalled();
+    expect(getter).not.toHaveBeenCalled();
+    expect(snapshots.every((snapshot) => snapshot.includes('[Stack unavailable: custom formatter]'))).toBe(true);
+  });
+
   it('bounds UTF-8 text, argument count, depth and child count', () => {
     const entry = createLogEntry('browser', 'log', Array.from({ length: 200 }, () => '😀'.repeat(10000)));
     const textBytes = Buffer.byteLength(entry.message) + entry.args.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0);

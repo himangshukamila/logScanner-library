@@ -94,13 +94,16 @@ for (const variant of variants) {
   });
   writeFileSync(join(consumer, 'index.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Log Scanner package verification</title></head><body><div id="root"></div><script type="module" src="/main.tsx"></script></body></html>\n');
   writeFileSync(join(consumer, 'main.tsx'), `import { createRoot } from 'react-dom/client';
-import { LogScanner, installBrowserCapture, type LogScannerProps, type LogEntry } from ${JSON.stringify(manifest.name)};
+import { LogScanner, installBrowserCapture, mountLogScanner, type MountedLogScanner, type LogScannerProps, type LogEntry } from ${JSON.stringify(manifest.name)};
 import ${JSON.stringify(`${manifest.name}/styles.css`)};
 
 const props: LogScannerProps = { enabled: true, maxLogs: 50, serverUrl: '/__log-scanner/events' };
 const entrySource: LogEntry['source'] = 'browser';
 const stop = installBrowserCapture();
 stop();
+const independent: MountedLogScanner = mountLogScanner({ visible: false });
+independent.update({ visible: false, network: false });
+independent.dispose();
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing consumer root');
 root.dataset.logSource = entrySource;
@@ -154,10 +157,14 @@ assert.equal(realpathSync(createRequire(packageRequire.resolve('react-error-boun
 assert.equal(realpathSync(packageRequire.resolve('react-dom')), realpathSync(require.resolve('react-dom')), 'Log Scanner must use the consumer React DOM instance.');
 const levels = ['log', 'info', 'warn', 'error', 'debug'];
 const originals = new Map(levels.map(level => [level, console[level]]));
-const { LogScanner, installBrowserCapture } = await import(packageName);
+const { LogScanner, installBrowserCapture, mountLogScanner } = await import(packageName);
 const unchangedConsole = () => {
   for (const [level, original] of originals) assert.equal(console[level], original, level + ' was unexpectedly patched');
 };
+unchangedConsole();
+const independent = mountLogScanner({ visible: true, serverUrl: '/__log-scanner/events' });
+independent.update({ visible: false });
+independent.dispose();
 unchangedConsole();
 for (const enabled of [false, true]) {
   assert.equal(renderToString(React.createElement(LogScanner, { enabled, serverUrl: '/__log-scanner/events' })), '');

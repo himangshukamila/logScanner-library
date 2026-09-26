@@ -19,7 +19,7 @@ app.post('/api/check', (req, res) => {
     return;
   }
   console.info('Node.js received a server check', { message });
-  const response = { requestId: randomUUID(), uptime: process.uptime(), node: process.version };
+  const response = { requestId: randomUUID(), uptime: process.uptime(), node: process.version, request: { message } };
   console.log('this is server responce', response);
   res.json(response);
 });

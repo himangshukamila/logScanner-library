@@ -2,13 +2,15 @@ import type { LogEntry, LogLevel, LogSource, NetworkInfo } from './types.js';
 
 // args and message duplicate text; reserve the remaining 784 bytes for JSON metadata.
 const ARGUMENT_BYTES = 7800;
-// Request and response previews are inspected, not replayed, so they stay far below the argument budget.
-const BODY_BYTES = 2000;
+// Network previews have their own bounded budget and are not duplicated in entry.args.
+export const BODY_BYTES = 16 * 1024;
 const MAX_ARGUMENTS = 64;
 const MAX_CHILDREN = 40;
 const MAX_DEPTH = 5;
 const TRUNCATED = '… [truncated]';
 const identityKey = Symbol.for('log-scanner.entry-identity.v1');
+const NativeError = Error;
+let nativeStackGetter: (() => unknown) | null | undefined;
 
 interface Identity { prefix: string; next: number }
 
@@ -66,14 +68,56 @@ class PreviewWriter {
   }
 }
 
-function descriptorValue(value: object, key: string): unknown {
+function findDescriptor(value: object, key: string): PropertyDescriptor | undefined {
   let current: object | null = value;
   for (let depth = 0; current && depth < 5; depth++) {
     const descriptor = Object.getOwnPropertyDescriptor(current, key);
-    if (descriptor) return 'value' in descriptor ? descriptor.value : '[Getter]';
+    if (descriptor) return descriptor;
     current = Object.getPrototypeOf(current) as object | null;
   }
   return undefined;
+}
+
+function descriptorValue(value: object, key: string): unknown {
+  const descriptor = findDescriptor(value, key);
+  return descriptor ? 'value' in descriptor ? descriptor.value : '[Getter]' : undefined;
+}
+
+function hasCustomStackFormatter(): boolean {
+  let current: object | null = NativeError;
+  for (let depth = 0; current && depth < 5; depth++) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, 'prepareStackTrace');
+    if (descriptor) return !('value' in descriptor) || typeof descriptor.value === 'function';
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return current !== null;
+}
+
+function hasSafeErrorText(value: Error): boolean {
+  return ['name', 'message'].every((key) => {
+    const descriptor = findDescriptor(value, key);
+    // Native stack formatting reads these properties and otherwise could run user code.
+    return descriptor && 'value' in descriptor && typeof descriptor.value === 'string';
+  });
+}
+
+function readErrorStack(value: Error): unknown {
+  // Older engines may materialize a lazy stack even during descriptor inspection.
+  if (hasCustomStackFormatter()) return '[Stack unavailable: custom formatter]';
+  if (!hasSafeErrorText(value)) return '[Getter]';
+  const descriptor = findDescriptor(value, 'stack');
+  if (!descriptor) return undefined;
+  if ('value' in descriptor) return descriptor.value;
+  if (!descriptor.get) return '[Getter]';
+
+  if (nativeStackGetter === undefined) {
+    const probe = new NativeError('');
+    if (!hasSafeErrorText(probe)) return '[Getter]';
+    const getter = findDescriptor(probe, 'stack')?.get;
+    nativeStackGetter = getter && /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(getter)) ? getter : null;
+  }
+  if (descriptor.get !== nativeStackGetter) return '[Getter]';
+  return nativeStackGetter?.call(value);
 }
 
 function writeValue(value: unknown, writer: PreviewWriter, seen: WeakSet<object>, depth: number): void {
@@ -100,9 +144,16 @@ function writeValue(value: unknown, writer: PreviewWriter, seen: WeakSet<object>
       if (typeof name === 'string') writer.write(name);
       else writeValue(name, writer, seen, depth + 1);
       writer.write(': ');
-      writeValue(descriptorValue(value, 'message') ?? '', writer, seen, 0);
-      const stack = descriptorValue(value, 'stack');
-      if (typeof stack === 'string') { writer.write('\n'); writer.write(stack); }
+      const message = descriptorValue(value, 'message') ?? '';
+      writeValue(message, writer, seen, 0);
+      const stack = readErrorStack(value);
+      if (typeof stack === 'string') {
+        const header = typeof name === 'string' && typeof message === 'string' ? `${name}: ${message}` : undefined;
+        const trace = header !== undefined && stack === header ? ''
+          : header !== undefined && stack.startsWith(`${header}\n`) ? stack.slice(header.length + 1)
+          : stack;
+        if (trace) { writer.write('\n'); writer.write(trace); }
+      }
       const cause = Object.getOwnPropertyDescriptor(value, 'cause');
       if (cause && 'value' in cause) {
         writer.write('\nCaused by: ');
@@ -162,9 +213,20 @@ function writeValue(value: unknown, writer: PreviewWriter, seen: WeakSet<object>
 }
 
 /** Bound any captured text to the preview budget, marking it when it was cut short. */
-export function previewText(text: string, limit = BODY_BYTES): string {
+export function previewText(text: string, limit = BODY_BYTES, truncated = false): string {
   const part = takeBytes(text, limit);
-  return part.text.length < text.length ? part.text + TRUNCATED : part.text;
+  if (!truncated && part.text.length === text.length) return part.text;
+  const marker = takeBytes(TRUNCATED, limit);
+  return takeBytes(part.text, Math.max(0, limit - marker.bytes)).text + marker.text;
+}
+
+/** Preview an XHR JSON value without allocating an unbounded JSON.stringify result. */
+export function previewBody(value: unknown): string {
+  const writer = new PreviewWriter(BODY_BYTES);
+  // JSON response strings retain quotes, unlike console.log string arguments.
+  try { writeValue(value, writer, new WeakSet(), typeof value === 'string' ? 1 : 0); }
+  catch { writer.write('[Unserializable]'); }
+  return writer.finish();
 }
 
 function statusLevel(info: NetworkInfo): LogLevel {
@@ -189,7 +251,7 @@ export function createNetworkEntry(info: NetworkInfo, timestamp = Date.now()): L
   });
 }
 
-/** Snapshot immediately; never keep references to application objects or invoke getters. */
+/** Snapshot immediately; never keep references to application objects or invoke application property getters. */
 export function createLogEntry(source: LogSource, level: LogLevel, values: readonly unknown[]): LogEntry {
   const args: string[] = [];
   let remaining = ARGUMENT_BYTES;

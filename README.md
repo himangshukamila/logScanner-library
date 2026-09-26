@@ -1,6 +1,6 @@
 # logscan
 
-**See your app's console output inside your app.** A development-only React panel — floating, draggable, resizable — that mirrors browser logs, and optionally logs from your local Node.js server, without touching how you write code.
+**See your app's console output inside your app.** A development-only React panel for console messages, network previews, and optional local Node.js logs. Mount it independently to keep the viewer available when your application React root crashes.
 
 [![npm](https://img.shields.io/npm/v/logscan.svg)](https://www.npmjs.com/package/logscan)
 [![license](https://img.shields.io/npm/l/logscan.svg)](https://www.npmjs.com/package/logscan)
@@ -16,27 +16,29 @@ Keep using `console.log()`, `console.info()`, `console.warn()`, `console.error()
 npm install logscan
 ```
 
-React 18.3 or 19 is a peer dependency. No Tailwind, no CSS setup, no provider, no config.
+React and ReactDOM 18.3 or 19 are peer dependencies. Styles load automatically; consumers do not need Tailwind.
 
 ## Quick start
 
-Mount one `<LogScanner />` at the root of your app, behind your dev flag:
+Initialize one standalone scanner in your browser entry file, before rendering the application:
 
 ```tsx
-import { LogScanner } from 'logscan';
-import { App } from './App';
+// main.tsx — Vite example
+import { createRoot } from 'react-dom/client';
+import { mountLogScanner } from 'logscan';
 
-export function Root() {
-  return (
-    <>
-      <App />
-      <LogScanner visible={import.meta.env.DEV} />
-    </>
-  );
-}
+const scanner = mountLogScanner({ visible: import.meta.env.DEV });
+import.meta.hot?.dispose(() => scanner.dispose());
+
+const { App } = await import('./App');
+const element = document.getElementById('root');
+if (!element) throw new Error('Missing root element');
+createRoot(element).render(<App />);
 ```
 
-That's it. Keep logging the way you always do:
+The scanner owns a separate React root attached to the page. Application-root render failures and unmounts cannot remove that root. Capture starts synchronously when `mountLogScanner` is called with visibility enabled; the dynamic import also lets it observe logs from application module initialization.
+
+Keep logging normally:
 
 ```ts
 console.log('Cart updated', { items: 3, total: 42 });
@@ -46,39 +48,65 @@ console.error(new Error('Checkout failed'));
 
 A logo button appears in the bottom-right corner. Click it to open the panel, search, filter, expand arguments, and copy entries.
 
-> `import.meta.env.DEV` is the Vite dev flag. Use `process.env.NODE_ENV !== 'production'` for Next.js/CRA, or any flag your bundler provides. Nothing renders and nothing is captured when `visible` is false.
+`import.meta.env.DEV` is the Vite flag. Use your framework's development flag and browser initialization entry elsewhere. The helper is safe to import on the server and returns an inert handle when browser globals are absent.
 
 Styles are injected automatically on mount. Importing CSS is optional (see [Styling](#styling)).
 
-## Props
+## Standalone API and props
+
+`mountLogScanner(options: LogScannerProps)` returns a `MountedLogScanner`:
+
+| Method | Behavior |
+| --- | --- |
+| `update(partialOptions)` | Merge props into the current configuration. Omitted props retain their previous values. |
+| `dispose()` | Unmount the independent viewer and release its capture, stream, listeners, and container. Repeated calls are safe; subsequent updates do nothing. |
+
+There is one standalone session per page. Calling `mountLogScanner` again disposes the previous session; stale handles cannot change the replacement. Initialize it in browser bootstrap and dispose it during hot reload or explicit teardown. If the document body is not ready, capture can start immediately and the viewer waits for `DOMContentLoaded`.
+
+The helper and the JSX component accept the same options:
 
 | Prop | Type | Default | Behavior |
 | --- | --- | --- | --- |
 | `visible` | `boolean` | `false` | The master switch. Controls the launcher, the panel, browser capture, and the server stream. |
-| `position` | `'bottom-right' \| 'bottom-left' \| 'top-right' \| 'top-left'` | `'bottom-right'` | Which corner the launcher sits in. The panel docks into the same corner. |
+| `position` | `'bottom-right' \| 'bottom-left' \| 'top-right' \| 'top-left'` | `'bottom-right'` | Launcher corner and initial panel docking. A remembered rectangle is restored and clamped to the available viewport. |
 | `network` | `boolean` | `true` | Capture `fetch` and `XMLHttpRequest` calls. See [Network capture](#network-capture). |
 | `serverUrl` | `string` | — | Same-origin SSE endpoint for Node.js logs. Omit for browser-only capture. |
-| `maxLogs` | `number` | `500` | Combined browser + network + server history size. Clamped to `1`–`5000`. |
+| `maxLogs` | `number` | `500` | Combined browser + network + server history size. Finite values are floored/clamped to `1`–`5000`; non-finite values use `500`. |
 | `enabled` | `boolean` | `false` | **Deprecated.** Legacy fallback used only when `visible` is omitted. |
 
 `visible` always wins: `<LogScanner visible={false} enabled />` stays off. Use `visible` in new code.
+
+### Component integration
+
+The original component remains available when application-owned lifetime is appropriate:
+
+```tsx
+import { LogScanner } from 'logscan';
+import { App } from './App';
+
+export function Root() {
+  return <><App /><LogScanner visible={import.meta.env.DEV} /></>;
+}
+```
+
+Its portal changes DOM placement, not React ownership. An ancestor crash or application-root unmount can still remove `<LogScanner />`. Use `mountLogScanner` for an independent viewer; do not mount both integrations in the same application.
 
 ## Features
 
 | | |
 | --- | --- |
 | **Browser capture** | All five console methods, plus uncaught errors and unhandled promise rejections. |
-| **Network capture** | Every `fetch` and `XMLHttpRequest`: method, URL, status, duration, and request/response bodies. |
+| **Network capture** | `fetch` and `XMLHttpRequest` metadata with bounded request/response previews. |
 | **Server logs** | Console output from an instrumented local Node.js process, streamed over SSE. Opt-in. |
 | **Movable panel** | Drag the header; resize from either corner; adjust with the keyboard. Position survives reload. |
 | **Search & filters** | Substring search combined with level and Browser/Network/Server source filters. |
-| **Readable values** | Strings, numbers, keywords, and truncation markers are colour-coded in previews. |
+| **Readable values** | Complete JSON objects/arrays are indented without rewriting numeric tokens; errors retain multiline stacks. Syntax colours aid inspection. |
 | **Argument inspection** | Timestamps, level/source labels, and expandable snapshots of each argument. |
-| **Copy & clear** | Copy a single entry with metadata, or clear the retained history. |
+| **Copy & clear** | Copy the full entry, a response, or an individual detail section; clear retained history. |
 | **Smart scrolling** | Follows new logs while you're at the bottom; scroll up to read without being yanked back. |
 | **Bounded by design** | 500 entries by default, size-capped snapshots, batched renders — safe during log storms. |
 | **Zero setup** | Self-injecting styles, inline SVG logo, no Tailwind and no image requests in your app. |
-| **Framework-safe** | StrictMode-safe, hot-reload-safe, SSR-safe imports, wrapped in an error boundary. |
+| **Independent viewer** | `mountLogScanner` keeps the viewer outside the application's React root. Shared capture supports StrictMode and hot reload; imports are SSR-safe. |
 | **Accessible** | Keyboard drag/resize, focus management, live status regions, labelled controls. |
 | **Typed** | TypeScript declarations for every export. |
 
@@ -90,19 +118,20 @@ Styles are injected automatically on mount. Importing CSS is optional (see [Styl
 | Header | Drag with mouse or touch. When focused, arrows move 10px; Shift + arrows move 1px. |
 | Top-left handle | Resize while pinning the bottom-right corner — useful for enlarging the docked panel. |
 | Bottom-right handle | Resize while pinning the top-left corner. Both handles support arrows and Shift + arrows. |
-| Filter toggle | Collapse the search/level/source toolbar to hand its height back to the log list — worth ~90px on a small panel, where the toolbar wraps to two rows. The choice is remembered across reloads. |
-| Search | Case-insensitive substring match on the message text. For network rows that covers the method, URL, and status. |
-| Level / Source | Combine severity and Browser/Network/Server filters with search. Collapsing the toolbar keeps its filters applied, and the toggle shows a dot while any is active. |
-| Inspect arguments | Expand the text snapshot taken at the moment of the console call. |
-| Copy icon | Copies `[ISO timestamp] [source] [level] message`. |
-| Clear icon | Clears the browser store, including filtered-out entries. Does not touch DevTools or server history. |
+| Filters | Reveal Level/Source controls; they start collapsed unless this tab remembers an expanded preference. Search and Clear always remain visible. |
+| Search | Case-insensitive substring match on the message plus network URL, request body, and response body previews. |
+| Level / Source | Combine severity and Browser/Network/Server filters with search. Collapsing controls keeps their filters applied; active filtering is indicated. Reset clears search and both selections. |
+| Details | Expand captured arguments; network rows expose Response and request details. |
+| Copy | Copies metadata and individually formatted console arguments, separated by newlines. Network entries include their summary, initiator, status, duration, URL, content type, and captured request/response bodies. |
+| Copy response / section Copy | Copy the response preview directly, or copy an individual expanded argument, URL, body, or error section. Complete JSON containers are formatted for readability. |
+| Clear | Clears the browser store, including filtered-out entries. Does not touch DevTools or server history. |
 | Escape / close | Close the panel and return focus to the launcher. |
 
-The panel opens at up to **640 × 512px**, shrinks to a **320 × 280px** minimum, and always stays inside the viewport. **Position, size, and whether the filter toolbar is collapsed are remembered in `sessionStorage`**, so they survive a reload and are cleared when the tab closes. Filter values themselves reset when the scanner is hidden or unmounted. Opening the panel focuses the search field, or the log list when the toolbar is collapsed.
+The panel opens at up to **640 × 512px**, with a usual minimum of **320 × 280px**, reduced for smaller viewports. Position, size, and expanded-filter preference are remembered in `sessionStorage`; unavailable storage falls back to in-memory behavior. Search and filter values reset when the scanner is hidden or unmounted. Opening the panel focuses search.
 
 ## Network capture
 
-Every `fetch` and `XMLHttpRequest` is recorded automatically — no extra setup — and shows up under the **Network** source filter:
+Supported `fetch` and `XMLHttpRequest` calls made while capture is active appear under the **Network** source filter:
 
 ```
 POST  /api/checkout    200   142 ms
@@ -116,11 +145,14 @@ Capture is passive. Your request is passed through untouched, the response your 
 
 | Detail | Behavior |
 | --- | --- |
-| Bodies | Request and response previews are capped at 2 KB. Only text-shaped content types are read (`text/*`, JSON, XML, form-encoded); anything else is labelled by type, e.g. `[image/png]`. |
-| Large responses | Skipped when `content-length` exceeds 512 KB, and labelled with the declared size. |
-| Streams | `text/event-stream` is never read, and any body preview that stalls past 2 s is abandoned rather than delaying later entries. |
-| Timing | Wall-clock duration from call to response, via `performance.now()`. |
-| Failures | A rejected `fetch` or a zero-status XHR is recorded as `failed` with the error text. |
+| Bodies | Each captured request/response preview has a 16 KiB budget, including JSON escaping. Truncated content is marked. These are previews, not guaranteed complete payloads. |
+| Fetch content types | Text-shaped responses (`text/*`, JSON, XML, form-encoded) are eligible. Other types are described, for example `[image/png]`; `text/event-stream` is described without reading. |
+| Large fetch responses | Skipped when declared `content-length` exceeds 512 KiB, with a size marker. |
+| Preview work | At most eight fetch body previews run concurrently. Extra responses retain metadata with `[body preview skipped: busy]`. A preview times out after two seconds and its cloned reader is cancelled. |
+| Timing and order | Duration uses `performance.now()` from request call to response settlement. Entries append when their preview finishes; timestamps retain response-settlement time, so later responses may appear first. |
+| XHR | Text/JSON response types are previewed at `loadend`; other response types are described. The asynchronous fetch-preview limits do not govern XHR. |
+| Failures | Rejected fetches retain a bounded error string; zero-status XHR is marked failed. Metadata remains available when body previewing fails. |
+| Teardown | Hiding or disposing the scanner cancels owned clone previews and detaches XHR listeners. It does not abort the application's requests. |
 
 Turn it off with `network={false}` if you don't want `fetch` patched:
 
@@ -132,42 +164,43 @@ Uploads are described rather than copied (`[FormData] file, name`, `[Blob 4096 b
 
 ## Toggling at runtime
 
-Drive `visible` from state to build your own in-app switch:
+Keep the handle returned by bootstrap and update it from your development controls:
 
-```tsx
-import { useState } from 'react';
-import { LogScanner } from 'logscan';
-
-export function Root() {
-  const [visible, setVisible] = useState(import.meta.env.DEV);
-
-  return (
-    <>
-      <App />
-      <button type="button" aria-pressed={visible} onClick={() => setVisible((v) => !v)}>
-        {visible ? 'Disable logs' : 'Enable logs'}
-      </button>
-      <LogScanner visible={visible} />
-    </>
-  );
-}
+```ts
+scanner.update({ visible: false });
+scanner.update({ visible: true, position: 'bottom-left' });
+scanner.update({ network: false });
+// Release the standalone session when it is no longer needed.
+scanner.dispose();
 ```
+
+For component integration, pass the same values as React props instead.
 
 | Action | UI | Capture | History |
 | --- | --- | --- | --- |
 | Close the panel | Launcher stays | Continues | Kept |
 | `visible={false}` | Everything hidden | Stops | Kept |
 | `visible={true}` again | Launcher returns, panel closed | Resumes | Available again |
-| Unmount the scanner | Everything hidden | Stops, connections released | Kept for the page |
+| Dispose standalone / unmount final component | Everything hidden | Stops, connections released | Kept for the page |
 | Reload the page | New session | Follows the new config | Cleared |
 
 Console calls emitted while capture is off cannot be recovered.
 
-**Mount one scanner, at the root.** History and browser capture are shared globally; if several scanners mount, any hidden one pauses the shared collector.
+Use one integration per page. History and browser capture are shared globally; if several component scanners mount, any hidden one pauses the shared collector. Each active viewer still owns its own server connection.
+
+The Node adapter has a separate lifetime. Browser visibility closes its connection but does not stop server capture; restoring visibility may replay server logs emitted while hidden.
+
+## When the application crashes
+
+The standalone viewer remains mounted when the application React root fails or unmounts. It records intercepted console calls, browser `error` events, and unhandled promise rejections. An error caught and silently consumed by an application error boundary is not observable; log it from the boundary's error callback if it should appear in the panel.
+
+The scanner does not prevent crashes or recover application state. Reloads, navigation, document replacement, a crashed tab, or a blocked JavaScript thread can remove or stop it. `<LogScanner />` inside the application tree cannot survive removal of its ancestor simply because its DOM is portalled into `document.body`.
 
 ## Capturing startup logs
 
-`<LogScanner />` starts capturing when its effect runs. To catch logs emitted *before* React mounts, install the collector in your entry file, then import your app dynamically:
+`mountLogScanner({ visible: true })` already captures synchronously, before its own React root commits. Use the quick-start dynamic import to include application module initialization.
+
+For component integration, `<LogScanner />` starts capturing when its effect runs. An optional startup collector can bridge that gap:
 
 ```tsx
 import { createRoot } from 'react-dom/client';
@@ -177,7 +210,9 @@ const stopCapture = import.meta.env.DEV ? installBrowserCapture({ maxLogs: 500 }
 import.meta.hot?.dispose(stopCapture);
 
 const { Root } = await import('./Root');
-createRoot(document.getElementById('root')!).render(<Root />);
+const element = document.getElementById('root');
+if (!element) throw new Error('Missing root element');
+createRoot(element).render(<Root />);
 ```
 
 The dynamic import matters — static imports run before the entry module's own body, so the collector would install too late.
@@ -243,9 +278,11 @@ export default defineConfig({
 
 ### 3. Point the scanner at the proxied path
 
-```tsx
-<LogScanner visible={import.meta.env.DEV} serverUrl="/__log-scanner/events" maxLogs={500} />
+```ts
+scanner.update({ serverUrl: '/__log-scanner/events', maxLogs: 500 });
 ```
+
+This updates the standalone handle from the quick start. For component integration, pass `serverUrl` and `maxLogs` as `<LogScanner />` props.
 
 The browser requires the stream to be on the **page's own origin**. A different port is a different origin, even on localhost — hence the proxy.
 
@@ -281,13 +318,13 @@ console.log(…)          fetch / XHR             console.log(…)   [Node]
 
 Arguments are converted to immutable text snapshots at call time, so the panel never holds references to your objects. Entries are appended in arrival order (rather than sorting clocks across processes) and UI notifications are batched during bursts.
 
-The server sends named `log` events with IDs, so native `EventSource` reconnection replays only what you missed; the browser suppresses duplicates by ID. A backend outage never stops browser capture.
+The server sends named `log` events with IDs. A known reconnect cursor replays newer retained entries; an absent or expired cursor replays available history. The browser suppresses recent duplicates by ID. A backend outage leaves browser capture running.
 
 ## Styling
 
-The stylesheet injects itself into `<head>` on mount — you don't need to import anything. It uses compiled, `ls:`-prefixed Tailwind utilities with **no Preflight**, so it cannot leak into or inherit from your app's styles. The logo is inline SVG, so the package ships no image files and makes no extra network request.
+The stylesheet injects into `<head>` once when an active viewer mounts. It uses compiled, `ls:`-prefixed Tailwind utilities without Preflight to avoid global resets. This is not Shadow DOM isolation: broad application CSS can still affect shared elements or inheritance. The logo is inline SVG; it needs no image file or request.
 
-If you'd rather control load order yourself, the compiled CSS is exported:
+The compiled stylesheet also remains available as an explicit import; automatic injection still runs:
 
 ```ts
 import 'logscan/styles.css';
@@ -297,14 +334,14 @@ import 'logscan/styles.css';
 
 | Import | Exports |
 | --- | --- |
-| `logscan` | `LogScanner`, `installBrowserCapture`, and the public types. |
+| `logscan` | `mountLogScanner`, `LogScanner`, `installBrowserCapture`, and public types. |
 | `logscan/node` | `createNodeLogScanner` — **server code only**. |
 | `logscan/styles.css` | Compiled stylesheet (optional). |
 
 ### TypeScript
 
 ```ts
-import type { LogScannerProps, LauncherPosition, LogEntry, LogLevel, LogSource, NetworkInfo } from 'logscan';
+import type { MountedLogScanner, LogScannerProps, LauncherPosition, LogEntry, LogLevel, LogSource, NetworkInfo } from 'logscan';
 import type { NodeLogScanner, NodeLogScannerOptions } from 'logscan/node';
 ```
 
@@ -344,13 +381,13 @@ interface NetworkInfo {
 - ESM-only package — modern bundlers and Node **22.12+** for the server adapter
 - Any modern browser; `EventSource` is required only for server streaming
 
-The package is SSR-safe to import: capture starts after mounting in the browser.
+Imports do not install capture. In the browser, the standalone helper/startup installer begin immediately when enabled; the component begins in its effect. On the server, standalone and startup calls are inert.
 
 ## Limits
 
-- **Memory only.** Log history is never written to disk, a database, or an upload; a reload or restart ends that session. The single exception is the panel's own position and size, kept in `sessionStorage`.
-- **Snapshots, not live objects.** Previews are readable (circular refs, errors, `Map`/`Set`, `Date`, `bigint`, accessors) but capped by argument count, depth, and size, with truncation markers. Getters and `toJSON()` are not intentionally invoked.
-- **No DevTools formatting.** `%c`, groups, tables, and interactive object trees are rendered as plain text. Wrapping the console can also affect source-link attribution.
+- **Log history stays in memory.** Reloads and restarts end their respective sessions. Only panel geometry and the expanded-filter preference are stored in `sessionStorage`.
+- **Snapshots, not live objects.** Previews are bounded by argument count, depth, and size. Ordinary/custom getters and `toJSON()` are skipped; supported native Error stack accessors may be read under guards so browser error stacks remain visible. Proxy reflection can still invoke traps.
+- **Console scope.** `%c` and `%s` formatting is not interpreted. `console.group`, `console.table`, and other methods outside the five intercepted levels are not captured. Wrapping the console can affect source-link attribution.
 - **Network scope.** `fetch` and `XMLHttpRequest` only. Requests from service workers, `sendBeacon`, WebSocket and EventSource traffic, and anything issued before capture installs are not recorded. Request/response *headers* are not captured beyond content type.
 - **Scope.** The current browser realm and the instrumented Node process. Workers, other frames, subprocess output, raw stdout writes, and Pino/Winston transports are out of scope.
 - **StrictMode.** Shared wrappers prevent duplicate interception, but genuine double-logging from your own effects still shows twice — as it should.
@@ -361,6 +398,8 @@ The package is SSR-safe to import: capture starts after mounting in the browser.
 | Symptom | Check |
 | --- | --- |
 | No launcher appears | Capture defaults to off — verify `visible`, your dev flag, and that the component actually mounts. |
+| Viewer disappears with an app crash | Use `mountLogScanner` before creating the application root. A JSX scanner still belongs to its ancestor React tree. |
+| A caught error is missing | Log it from the application's error-boundary/catch callback; swallowed errors produce no console or browser error event. |
 | Earlier logs are missing | Install [startup capture](#capturing-startup-logs) before dynamically importing your app. |
 | Capture stops unexpectedly | Another mounted scanner may be hidden; use a single root scanner. |
 | "Use a server stream URL on this page's origin" | Use a relative, proxied path. Direct backend URLs on another port are rejected. |
@@ -370,7 +409,7 @@ The package is SSR-safe to import: capture starts after mounting in the browser.
 | Stuck on "Reconnecting" | Check the backend and proxy. Browser capture keeps working regardless. |
 | Cleared logs reappear | A fresh stream replays the Node adapter's retained history. Clear only affects the browser store. |
 | No network rows | Check `network` is not `false`. Requests made before the scanner mounted are not captured — use [startup capture](#capturing-startup-logs). |
-| Response body missing | The content type is not text-shaped, the body exceeded 512 KB, or another wrapper consumed it first. Metadata is still recorded. |
+| Response body missing | Inspect its marker: unsupported type, stream, declared large body, preview concurrency limit, timeout, or clone/read failure. Metadata is still recorded. |
 | Copy fails | Clipboard permissions blocked it — select and copy the displayed text manually. |
 | Styles look wrong | Ensure only one copy of the package is installed; the stylesheet injects once per document. |
 
